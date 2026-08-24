@@ -1,0 +1,44 @@
+name: auto-update-fuel-data
+
+# Automatically refresh data.json from public fuel-price sources.
+# Triggered on a weekday schedule and can also be run manually.
+on:
+  schedule:
+    # 09:30 UTC on weekdays (adjust to your timezone / data publish time).
+    # MOPS and EIA publish on business days, so skip weekends.
+    - cron: "30 9 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fetch latest prices and rebuild data.json
+        env:
+          # Optional: set a free EIA key as a repo secret for higher rate limits.
+          # Falls back to the public DEMO_KEY when not set.
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+        run: python3 scripts/update_data.py
+
+      - name: Commit data.json if it changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data.json
+          if git diff --cached --quiet; then
+            echo "No data changes to commit."
+          else
+            git commit -m "chore(data): auto-update fuel prices $(date -u +%Y-%m-%d)"
+            git push
+          fi
