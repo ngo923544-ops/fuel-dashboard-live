@@ -47,6 +47,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .regime-item{background:#f8fafc;border-radius:8px;padding:12px;text-align:center;border:1px solid #e2e8f0}
 .regime-item .ri-label{font-size:11px;color:#64748b}
 .regime-item .ri-value{font-size:16px;font-weight:700;margin-top:2px}
+.regime-item .ri-sub{font-size:11px;margin-top:2px;font-weight:600;color:#94a3b8}
+.regime-item .ri-sub.up{color:#16a34a}
+.regime-item .ri-sub.down{color:#dc2626}
+.range-bar{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px}
+.range-btn{padding:5px 14px;font-size:12px;border:1px solid #e2e8f0;background:#f8fafc;color:#475569;border-radius:999px;cursor:pointer;transition:all .15s}
+.range-btn:hover{border-color:#cbd5e1;background:#f1f5f9}
+.range-btn.active{background:#2563eb;border-color:#2563eb;color:#fff;font-weight:600}
 .pred-table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
 .pred-table th{background:#f1f5f9;padding:8px 12px;text-align:left;font-weight:600;color:#475569;border-bottom:2px solid #e2e8f0}
 .pred-table td{padding:8px 12px;border-bottom:1px solid #f1f5f9}
@@ -102,6 +109,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="factor-item"><label>经济前景</label><div class="slider-row"><input type="range" id="sEcon" min="-30" max="30" value="0" oninput="try{updateScenarioDisplay()}catch(e){}"><span class="slider-val" id="sEconVal">0.0</span></div></div>
 </div></div></div>
 <div class="card" style="position:relative"><div class="card-title" id="chartTitle">历史价格走势</div>
+<div class="range-bar" id="rangeBar">
+<button class="range-btn" data-days="30" onclick="try{setChartRange(30,this)}catch(e){}">近1月</button>
+<button class="range-btn" data-days="90" onclick="try{setChartRange(90,this)}catch(e){}">近3月</button>
+<button class="range-btn active" data-days="180" onclick="try{setChartRange(180,this)}catch(e){}">近6月</button>
+<button class="range-btn" data-days="365" onclick="try{setChartRange(365,this)}catch(e){}">近1年</button>
+<button class="range-btn" data-days="0" onclick="try{setChartRange(0,this)}catch(e){}">全部</button>
+</div>
 <div class="chart-container"><canvas id="mainChart"></canvas></div>
 <div class="loading-overlay" id="loadingOverlay"><div style="text-align:center"><div class="loading-spinner"></div><div style="margin-top:12px;color:#475569;font-size:13px">正在运行预测模型...</div></div></div></div>
 <div class="card"><div class="card-title">市场状态分析</div><div class="regime-panel">
@@ -109,6 +123,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="regime-item"><div class="ri-label">RSI (14)</div><div class="ri-value" id="regimeRSI">--</div></div>
 <div class="regime-item"><div class="ri-label">动量</div><div class="ri-value" id="regimeMomentum">--</div></div>
 <div class="regime-item"><div class="ri-label">波动率</div><div class="ri-value" id="regimeVolatility">--</div></div>
+<div class="regime-item"><div class="ri-label">周均价 (近7天)</div><div class="ri-value" id="regimeWeekAvg">--</div><div class="ri-sub" id="regimeWeekAvgDelta"></div></div>
+<div class="regime-item"><div class="ri-label">月均价 (近30天)</div><div class="ri-value" id="regimeMonthAvg">--</div><div class="ri-sub" id="regimeMonthAvgDelta"></div></div>
 </div></div>
 <div class="card"><div class="card-title">统计概览</div><div class="stats-grid">
 <div class="stat-card"><div class="stat-label">最新价格</div><div class="stat-value" id="statLatest">--</div></div>
@@ -224,6 +240,7 @@ let currentTab = 'mops';
 let currentData = [];
 let currentChart = null;
 let lastPrediction = null;
+let chartRangeDays = 180;
 const TAB_COLORS = {mops:'#2563eb',usgulf:'#059669',brent:'#d97706'};
 const TAB_UNITS = {mops:'USD/bbl',usgulf:'USD/gal',brent:'USD/bbl'};
 const TAB_FREQ = {mops:'daily',usgulf:'daily',brent:'daily'};
@@ -269,6 +286,7 @@ function loadBuiltinData() {
   renderChart(null);
   updateStats();
   updateRegime();
+  updateAverages();
 }
 
 // ================================================================
@@ -539,18 +557,68 @@ function runPredictionClick() {
 // ================================================================
 //  CHART RENDERING
 // ================================================================
+// ================================================================
+//  AVERAGES (WEEK / MONTH) + CHART RANGE
+// ================================================================
+function updateAverages() {
+  if(!currentData.length) return;
+  var last = currentData[currentData.length-1].date;
+  function avgWindow(days){
+    var cutoff = new Date(last.getTime() - days*86400000);
+    var sum=0, cnt=0;
+    for(var i=currentData.length-1;i>=0;i--){
+      if(currentData[i].date >= cutoff){ sum+=currentData[i].price; cnt++; } else break;
+    }
+    return cnt ? sum/cnt : null;
+  }
+  function prevAvgWindow(days){
+    var end = new Date(last.getTime() - days*86400000);
+    var start = new Date(end.getTime() - days*86400000);
+    var sum=0, cnt=0;
+    for(var i=0;i<currentData.length;i++){
+      var d=currentData[i].date;
+      if(d>start && d<=end){ sum+=currentData[i].price; cnt++; }
+    }
+    return cnt ? sum/cnt : null;
+  }
+  setAvg('regimeWeekAvg','regimeWeekAvgDelta', avgWindow(7), prevAvgWindow(7));
+  setAvg('regimeMonthAvg','regimeMonthAvgDelta', avgWindow(30), prevAvgWindow(30));
+}
+function setAvg(valId, subId, cur, prev){
+  var v=document.getElementById(valId), s=document.getElementById(subId);
+  if(!v||!s) return;
+  if(cur==null){ v.textContent='--'; s.textContent=''; s.className='ri-sub'; return; }
+  v.textContent = cur.toFixed(2);
+  if(prev==null){ s.textContent=''; s.className='ri-sub'; return; }
+  var delta = (cur-prev)/prev*100;
+  s.textContent = '环比 '+(delta>=0?'+':'')+delta.toFixed(1)+'%';
+  s.className = 'ri-sub ' + (delta>=0?'up':'down');
+}
+function setChartRange(days, btn){
+  chartRangeDays = days;
+  document.querySelectorAll('.range-btn').forEach(function(b){b.classList.remove('active');});
+  if(btn) btn.classList.add('active');
+  renderChart(lastPrediction ? lastPrediction.forecast : null);
+}
+
 function renderChart(forecast) {
   var ctx = document.getElementById('mainChart').getContext('2d');
   if(currentChart) currentChart.destroy();
   var color = TAB_COLORS[currentTab];
-  var histData = currentData.map(function(d){return {x:d.date,y:d.price};});
+  var histSource = currentData;
+  if(chartRangeDays > 0 && currentData.length) {
+    var cutoff = new Date(currentData[currentData.length-1].date.getTime() - chartRangeDays*86400000);
+    histSource = currentData.filter(function(d){return d.date >= cutoff;});
+    if(histSource.length < 2) histSource = currentData;
+  }
+  var histData = histSource.map(function(d){return {x:d.date,y:d.price};});
   var datasets = [{
     label: '\u5386\u53f2\u4ef7\u683c',
     data: histData,
     borderColor: color,
     backgroundColor: color+'20',
     borderWidth: 1.5,
-    pointRadius: currentTab==='mops'?0:3,
+    pointRadius: histData.length<=120 ? 2 : (currentTab==='mops'?0:3),
     fill: false,
     tension: 0.1
   }];
