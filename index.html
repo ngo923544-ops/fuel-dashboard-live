@@ -497,15 +497,20 @@ function predictMultifactor(data, horizon) {
     }
     var stepPrices = paths.map(function(p){return p[t];});
     stepPrices.sort(function(a,b){return a-b;});
-    var p5 = stepPrices[Math.floor(nPaths*0.05)];
-    var p25 = stepPrices[Math.floor(nPaths*0.25)];
-    var p50 = stepPrices[Math.floor(nPaths*0.50)];
-    var p75 = stepPrices[Math.floor(nPaths*0.75)];
-    var p95 = stepPrices[Math.floor(nPaths*0.95)];
-    var predicted = (wMom*momComp + wMR*mrComp + wSea*(lastPrice+seaComp) + wVol*p50) / wSum;
+    var p5raw = stepPrices[Math.floor(nPaths*0.05)];
+    var p25raw = stepPrices[Math.floor(nPaths*0.25)];
+    var p50raw = stepPrices[Math.floor(nPaths*0.50)];
+    var p75raw = stepPrices[Math.floor(nPaths*0.75)];
+    var p95raw = stepPrices[Math.floor(nPaths*0.95)];
+    var predicted = (wMom*momComp + wMR*mrComp + wSea*(lastPrice+seaComp) + wVol*p50raw) / wSum;
     var scenarioMod = (sGeo*0.02 + sSupply*0.015 + sEcon*0.01) * Math.min(t/horizon, 1) * Math.exp(-0.01*t);
     predicted *= (1 + scenarioMod);
-    forecast.push({date:futureDate, price:predicted, p5:p5, p25:p25, p50:p50, p75:p75, p95:p95});
+    // Re-center CI around predicted using MC spread ratios
+    var ratio5 = p50raw > 0 ? p5raw / p50raw : 0.9;
+    var ratio25 = p50raw > 0 ? p25raw / p50raw : 0.95;
+    var ratio75 = p50raw > 0 ? p75raw / p50raw : 1.05;
+    var ratio95 = p50raw > 0 ? p95raw / p50raw : 1.1;
+    forecast.push({date:futureDate, price:predicted, p5:predicted*ratio5, p25:predicted*ratio25, p50:predicted, p75:predicted*ratio75, p95:predicted*ratio95});
   }
   return forecast;
 }
