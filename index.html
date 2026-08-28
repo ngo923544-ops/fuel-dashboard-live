@@ -85,14 +85,36 @@ body{font-family:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe 
 </style>
 </head>
 <body>
-<div class="header"><h1>航空燃油价格预测工具</h1><p>支持多因子加权、SMA移动平均、Holt线性趋势 | 蒙特卡洛置信区间 | 回测验证<br><span id="dataStatusBadge" class="data-badge loading">正在检查数据更新…</span></p></div>
+<div class="header"><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px"><h1>航空燃油价格预测工具</h1><span id="dataStatusBadge" class="data-badge loading">正在检查数据更新…</span></div><p style="font-size:12px;opacity:0.6;margin-top:4px">多因子加权 · SMA移动平均 · Holt线性趋势 · 蒙特卡洛置信区间 · 回测验证</p></div>
 <div class="container">
 <div class="tabs">
 <button class="tab-btn active" id="tab-mops" onclick="try{switchTab('mops')}catch(e){console.error(e)}">MOPS航空煤油 (日线)</button>
 <button class="tab-btn" id="tab-usgulf" onclick="try{switchTab('usgulf')}catch(e){console.error(e)}">US Gulf航油 (日线)</button>
 <button class="tab-btn" id="tab-brent" onclick="try{switchTab('brent')}catch(e){console.error(e)}">Brent原油 (日线)</button>
 </div>
-<div class="card"><div class="card-title">预测控制</div>
+<div class="card" style="position:relative"><div class="card-title" id="chartTitle">历史价格走势</div>
+<div class="range-bar" id="rangeBar">
+<button class="range-btn" data-days="30" onclick="try{setChartRange(30,this)}catch(e){}">近1月</button>
+<button class="range-btn" data-days="90" onclick="try{setChartRange(90,this)}catch(e){}">近3月</button>
+<button class="range-btn active" data-days="180" onclick="try{setChartRange(180,this)}catch(e){}">近6月</button>
+<button class="range-btn" data-days="365" onclick="try{setChartRange(365,this)}catch(e){}">近1年</button>
+<button class="range-btn" data-days="0" onclick="try{setChartRange(0,this)}catch(e){}">全部</button>
+</div>
+<div class="chart-container"><canvas id="mainChart"></canvas></div>
+<div class="loading-overlay" id="loadingOverlay"><div style="text-align:center"><div class="loading-spinner"></div><div style="margin-top:12px;color:#475569;font-size:13px">正在运行预测模型...</div></div></div></div>
+<div class="card"><div class="card-title">市场状态分析</div><div class="regime-panel">
+<div class="regime-item"><div class="ri-label">市场状态</div><div class="ri-value" id="regimeState">--</div></div>
+<div class="regime-item"><div class="ri-label">RSI (14)</div><div class="ri-value" id="regimeRSI">--</div></div>
+<div class="regime-item"><div class="ri-label">动量</div><div class="ri-value" id="regimeMomentum">--</div></div>
+<div class="regime-item"><div class="ri-label">波动率</div><div class="ri-value" id="regimeVolatility">--</div></div>
+<div class="regime-item"><div class="ri-label">周均价 (近7天)</div><div class="ri-value" id="regimeWeekAvg">--</div><div class="ri-sub" id="regimeWeekAvgDelta"></div></div>
+<div class="regime-item"><div class="ri-label">月均价 (近30天)</div><div class="ri-value" id="regimeMonthAvg">--</div><div class="ri-sub" id="regimeMonthAvgDelta"></div></div>
+</div></div>
+<div class="card" id="predictionCard">
+<div class="card-title" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between" onclick="try{togglePredPanel()}catch(e){}">
+<span>预测控制</span><span id="predToggleIcon" style="font-size:12px;color:#94a3b8;transition:transform .2s">▼</span>
+</div>
+<div id="predPanelBody" style="display:none">
 <div class="controls-row">
 <div class="control-group"><label>预测模型</label><select id="modelSelect" onchange="try{onModelChange()}catch(e){}"><option value="multifactor">多因子加权</option><option value="sma">SMA移动平均</option><option value="holt">Holt线性趋势</option></select></div>
 <div class="control-group"><label>预测期数</label><input type="number" id="horizonInput" min="1" max="36" value="12"></div>
@@ -114,23 +136,6 @@ body{font-family:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe 
 <div class="factor-item"><label>供需关系</label><div class="slider-row"><input type="range" id="sSupply" min="-30" max="30" value="0" oninput="try{updateScenarioDisplay()}catch(e){}"><span class="slider-val" id="sSupplyVal">0.0</span></div></div>
 <div class="factor-item"><label>经济前景</label><div class="slider-row"><input type="range" id="sEcon" min="-30" max="30" value="0" oninput="try{updateScenarioDisplay()}catch(e){}"><span class="slider-val" id="sEconVal">0.0</span></div></div>
 </div></div></div>
-<div class="card" style="position:relative"><div class="card-title" id="chartTitle">历史价格走势</div>
-<div class="range-bar" id="rangeBar">
-<button class="range-btn" data-days="30" onclick="try{setChartRange(30,this)}catch(e){}">近1月</button>
-<button class="range-btn" data-days="90" onclick="try{setChartRange(90,this)}catch(e){}">近3月</button>
-<button class="range-btn active" data-days="180" onclick="try{setChartRange(180,this)}catch(e){}">近6月</button>
-<button class="range-btn" data-days="365" onclick="try{setChartRange(365,this)}catch(e){}">近1年</button>
-<button class="range-btn" data-days="0" onclick="try{setChartRange(0,this)}catch(e){}">全部</button>
-</div>
-<div class="chart-container"><canvas id="mainChart"></canvas></div>
-<div class="loading-overlay" id="loadingOverlay"><div style="text-align:center"><div class="loading-spinner"></div><div style="margin-top:12px;color:#475569;font-size:13px">正在运行预测模型...</div></div></div></div>
-<div class="card"><div class="card-title">市场状态分析</div><div class="regime-panel">
-<div class="regime-item"><div class="ri-label">市场状态</div><div class="ri-value" id="regimeState">--</div></div>
-<div class="regime-item"><div class="ri-label">RSI (14)</div><div class="ri-value" id="regimeRSI">--</div></div>
-<div class="regime-item"><div class="ri-label">动量</div><div class="ri-value" id="regimeMomentum">--</div></div>
-<div class="regime-item"><div class="ri-label">波动率</div><div class="ri-value" id="regimeVolatility">--</div></div>
-<div class="regime-item"><div class="ri-label">周均价 (近7天)</div><div class="ri-value" id="regimeWeekAvg">--</div><div class="ri-sub" id="regimeWeekAvgDelta"></div></div>
-<div class="regime-item"><div class="ri-label">月均价 (近30天)</div><div class="ri-value" id="regimeMonthAvg">--</div><div class="ri-sub" id="regimeMonthAvgDelta"></div></div>
 </div></div>
 <div class="card"><div class="card-title">统计概览</div><div class="stats-grid">
 <div class="stat-card"><div class="stat-label">最新价格</div><div class="stat-value" id="statLatest">--</div></div>
@@ -298,6 +303,17 @@ function loadBuiltinData() {
 // ================================================================
 //  UI HELPERS
 // ================================================================
+function togglePredPanel() {
+  var body = document.getElementById('predPanelBody');
+  var icon = document.getElementById('predToggleIcon');
+  if(body.style.display === 'none') {
+    body.style.display = 'block';
+    icon.style.transform = 'rotate(180deg)';
+  } else {
+    body.style.display = 'none';
+    icon.style.transform = 'rotate(0deg)';
+  }
+}
 function onModelChange() {
   var m = document.getElementById('modelSelect').value;
   var fp = document.getElementById('factorPanel');
