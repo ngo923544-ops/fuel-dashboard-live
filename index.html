@@ -84,6 +84,12 @@ body{font-family:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe 
 .bt-card .bt-row{display:flex;justify-content:space-between;font-size:12px;padding:2px 0}
 .bt-card .bt-row span:last-child{font-weight:600}
 .export-btns{display:flex;flex-wrap:wrap;gap:8px}
+.hint{position:relative;display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;background:var(--accent-light);color:var(--accent);font-size:10px;font-weight:700;cursor:help;margin-left:4px;vertical-align:middle;border:1px solid var(--accent-border);flex-shrink:0;line-height:1;font-style:normal;transition:all .2s}
+.hint:hover{background:var(--accent);color:#fff;box-shadow:0 0 0 3px var(--accent-glow)}
+.hint .hint-text{visibility:hidden;opacity:0;position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#1e293b;color:#f1f5f9;font-size:12px;font-weight:400;padding:8px 12px;border-radius:8px;white-space:normal;width:220px;line-height:1.5;box-shadow:0 4px 16px rgba(0,0,0,0.2);z-index:100;pointer-events:none;transition:opacity .2s,visibility .2s;text-align:left;letter-spacing:0}
+.hint .hint-text::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:6px solid transparent;border-top-color:#1e293b}
+.hint:hover .hint-text{visibility:visible;opacity:1}
+.ri-label,.stat-label,.control-group label,.factor-item>label{display:inline-flex;align-items:center}
 </style>
 </head>
 <body>
@@ -105,12 +111,12 @@ body{font-family:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe 
 <div class="chart-container"><canvas id="mainChart"></canvas></div>
 <div class="loading-overlay" id="loadingOverlay"><div style="text-align:center"><div class="loading-spinner"></div><div style="margin-top:12px;color:#475569;font-size:13px">正在运行预测模型...</div></div></div></div>
 <div class="card"><div class="card-title">市场状态分析</div><div class="regime-panel">
-<div class="regime-item"><div class="ri-label">市场状态</div><div class="ri-value" id="regimeState">--</div></div>
-<div class="regime-item"><div class="ri-label">RSI (14)</div><div class="ri-value" id="regimeRSI">--</div></div>
-<div class="regime-item"><div class="ri-label">动量</div><div class="ri-value" id="regimeMomentum">--</div></div>
-<div class="regime-item"><div class="ri-label">波动率</div><div class="ri-value" id="regimeVolatility">--</div></div>
-<div class="regime-item"><div class="ri-label">周均价 (近7天)</div><div class="ri-value" id="regimeWeekAvg">--</div><div class="ri-sub" id="regimeWeekAvgDelta"></div></div>
-<div class="regime-item"><div class="ri-label">月均价 (近30天)</div><div class="ri-value" id="regimeMonthAvg">--</div><div class="ri-sub" id="regimeMonthAvgDelta"></div></div>
+<div class="regime-item"><div class="ri-label">市场状态<i class="hint">i<span class="hint-text">综合RSI、波动率和动量判定的市场阶段：上涨、下跌、高波动或震荡</span></i></div><div class="ri-value" id="regimeState">--</div></div>
+<div class="regime-item"><div class="ri-label">RSI (14)<i class="hint">i<span class="hint-text">相对强弱指数，衡量近14天涨跌力度。>70超买（可能回调），<30超卖（可能反弹）</span></i></div><div class="ri-value" id="regimeRSI">--</div></div>
+<div class="regime-item"><div class="ri-label">动量<i class="hint">i<span class="hint-text">近10个交易日的涨跌幅百分比。正值=上涨动力，负值=下跌动力</span></i></div><div class="ri-value" id="regimeMomentum">--</div></div>
+<div class="regime-item"><div class="ri-label">波动率<i class="hint">i<span class="hint-text">近20日收益率的标准差，越高说明价格波动越剧烈、不确定性越大</span></i></div><div class="ri-value" id="regimeVolatility">--</div></div>
+<div class="regime-item"><div class="ri-label">周均价 (近7天)<i class="hint">i<span class="hint-text">最近7个交易日的平均价格，下方"环比"为与前一个7天窗口的变化百分比</span></i></div><div class="ri-value" id="regimeWeekAvg">--</div><div class="ri-sub" id="regimeWeekAvgDelta"></div></div>
+<div class="regime-item"><div class="ri-label">月均价 (近30天)<i class="hint">i<span class="hint-text">最近30个交易日的平均价格，下方"环比"为与前一个30天窗口的变化百分比</span></i></div><div class="ri-value" id="regimeMonthAvg">--</div><div class="ri-sub" id="regimeMonthAvgDelta"></div></div>
 </div></div>
 <div class="card" id="predictionCard">
 <div class="card-title" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between" onclick="try{togglePredPanel()}catch(e){}">
@@ -119,32 +125,32 @@ body{font-family:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe 
 <div id="predPanelBody" style="display:none">
 <div class="controls-row">
 <div class="control-group"><label>预测模型</label><select id="modelSelect" onchange="try{onModelChange()}catch(e){}"><option value="multifactor">多因子加权</option><option value="sma">SMA移动平均</option><option value="holt">Holt线性趋势</option></select></div>
-<div class="control-group"><label>预测期数</label><input type="number" id="horizonInput" min="1" max="36" value="12"></div>
-<div class="control-group"><label>MA窗口</label><input type="number" id="maWindowInput" min="2" max="24" value="6"></div>
-<div class="control-group"><label>置信度</label><select id="confidenceSelect"><option value="0.80">80%</option><option value="0.90" selected>90%</option><option value="0.95">95%</option></select></div>
+<div class="control-group"><label>预测期数<i class="hint">i<span class="hint-text">向前预测的期数（1-36），每期约一个交易周。建议4-12期</span></i></label><input type="number" id="horizonInput" min="1" max="36" value="12"></div>
+<div class="control-group"><label>MA窗口<i class="hint">i<span class="hint-text">SMA模型使用的移动平均窗口大小，越大越平滑但反应越慢</span></i></label><input type="number" id="maWindowInput" min="2" max="24" value="6"></div>
+<div class="control-group"><label>置信度<i class="hint">i<span class="hint-text">置信区间的覆盖概率。95%区间更宽但更可靠，80%更窄但覆盖率低</span></i></label><select id="confidenceSelect"><option value="0.80">80%</option><option value="0.90" selected>90%</option><option value="0.95">95%</option></select></div>
 <button class="btn btn-success" id="predictBtn" onclick="try{runPredictionClick()}catch(e){alert('预测出错: '+e.message)}">运行预测</button>
 </div>
 <div class="factor-panel" id="factorPanel">
 <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#334155">因子权重</div>
 <div class="factor-grid">
-<div class="factor-item"><label>趋势动量</label><div class="slider-row"><input type="range" id="wMomentum" min="0" max="100" value="35" oninput="try{updateWeightDisplay()}catch(e){}"><span class="slider-val" id="wMomentumVal">35%</span></div></div>
-<div class="factor-item"><label>均值回归</label><div class="slider-row"><input type="range" id="wMeanRev" min="0" max="100" value="25" oninput="try{updateWeightDisplay()}catch(e){}"><span class="slider-val" id="wMeanRevVal">25%</span></div></div>
-<div class="factor-item"><label>季节周期</label><div class="slider-row"><input type="range" id="wSeasonal" min="0" max="100" value="15" oninput="try{updateWeightDisplay()}catch(e){}"><span class="slider-val" id="wSeasonalVal">15%</span></div></div>
-<div class="factor-item"><label>波动风险</label><div class="slider-row"><input type="range" id="wVolatility" min="0" max="100" value="25" oninput="try{updateWeightDisplay()}catch(e){}"><span class="slider-val" id="wVolatilityVal">25%</span></div></div>
+<div class="factor-item"><label>趋势动量<i class="hint">i<span class="hint-text">捕捉价格惯性，调高则更跟随当前趋势方向，适合强趋势市场</span></i></label><div class="slider-row"><input type="range" id="wMomentum" min="0" max="100" value="35" oninput="try{updateWeightDisplay()}catch(e){}"><span class="slider-val" id="wMomentumVal">35%</span></div></div>
+<div class="factor-item"><label>均值回归<i class="hint">i<span class="hint-text">价格偏离均值后的回归拉力，调高则强化"终将回到均值"的假设，适合震荡市</span></i></label><div class="slider-row"><input type="range" id="wMeanRev" min="0" max="100" value="25" oninput="try{updateWeightDisplay()}catch(e){}"><span class="slider-val" id="wMeanRevVal">25%</span></div></div>
+<div class="factor-item"><label>季节周期<i class="hint">i<span class="hint-text">按历史同月价格规律预测，反映冬季取暖、夏季出行旺季等季节性供需</span></i></label><div class="slider-row"><input type="range" id="wSeasonal" min="0" max="100" value="15" oninput="try{updateWeightDisplay()}catch(e){}"><span class="slider-val" id="wSeasonalVal">15%</span></div></div>
+<div class="factor-item"><label>波动风险<i class="hint">i<span class="hint-text">基于1000条蒙特卡洛模拟路径，量化不确定性并生成置信区间</span></i></label><div class="slider-row"><input type="range" id="wVolatility" min="0" max="100" value="25" oninput="try{updateWeightDisplay()}catch(e){}"><span class="slider-val" id="wVolatilityVal">25%</span></div></div>
 </div>
 <div style="font-size:13px;font-weight:600;margin:12px 0 8px;color:#334155">情景调整 (-3 ~ +3)</div>
 <div class="scenario-grid">
-<div class="factor-item"><label>地缘政治</label><div class="slider-row"><input type="range" id="sGeo" min="-30" max="30" value="0" oninput="try{updateScenarioDisplay()}catch(e){}"><span class="slider-val" id="sGeoVal">0.0</span></div></div>
-<div class="factor-item"><label>供需关系</label><div class="slider-row"><input type="range" id="sSupply" min="-30" max="30" value="0" oninput="try{updateScenarioDisplay()}catch(e){}"><span class="slider-val" id="sSupplyVal">0.0</span></div></div>
-<div class="factor-item"><label>经济前景</label><div class="slider-row"><input type="range" id="sEcon" min="-30" max="30" value="0" oninput="try{updateScenarioDisplay()}catch(e){}"><span class="slider-val" id="sEconVal">0.0</span></div></div>
+<div class="factor-item"><label>地缘政治<i class="hint">i<span class="hint-text">正值=局势紧张推高油价，负值=风险缓和压低油价。0为不调整</span></i></label><div class="slider-row"><input type="range" id="sGeo" min="-30" max="30" value="0" oninput="try{updateScenarioDisplay()}catch(e){}"><span class="slider-val" id="sGeoVal">0.0</span></div></div>
+<div class="factor-item"><label>供需关系<i class="hint">i<span class="hint-text">正值=减产/供应紧张推高价格，负值=增产/需求疲软压低价格</span></i></label><div class="slider-row"><input type="range" id="sSupply" min="-30" max="30" value="0" oninput="try{updateScenarioDisplay()}catch(e){}"><span class="slider-val" id="sSupplyVal">0.0</span></div></div>
+<div class="factor-item"><label>经济前景<i class="hint">i<span class="hint-text">正值=经济复苏提振油价，负值=衰退预期抑制油价</span></i></label><div class="slider-row"><input type="range" id="sEcon" min="-30" max="30" value="0" oninput="try{updateScenarioDisplay()}catch(e){}"><span class="slider-val" id="sEconVal">0.0</span></div></div>
 </div></div></div>
 </div></div>
 <div class="card"><div class="card-title">统计概览</div><div class="stats-grid">
 <div class="stat-card"><div class="stat-label">最新价格</div><div class="stat-value" id="statLatest">--</div></div>
-<div class="stat-card"><div class="stat-label">历史均值</div><div class="stat-value" id="statAvg">--</div></div>
+<div class="stat-card"><div class="stat-label">历史均值<i class="hint">i<span class="hint-text">全部历史数据的算术平均值，用于判断当前价格偏高还是偏低</span></i></div><div class="stat-value" id="statAvg">--</div></div>
 <div class="stat-card"><div class="stat-label">历史最高</div><div class="stat-value" id="statHigh">--</div></div>
 <div class="stat-card"><div class="stat-label">历史最低</div><div class="stat-value" id="statLow">--</div></div>
-<div class="stat-card"><div class="stat-label">波动率</div><div class="stat-value" id="statVol">--</div><div class="stat-sub">年化</div></div>
+<div class="stat-card"><div class="stat-label">波动率<i class="hint">i<span class="hint-text">日收益率标准差×√252年化处理，衡量价格整体波动风险水平</span></i></div><div class="stat-value" id="statVol">--</div><div class="stat-sub">年化</div></div>
 </div></div>
 <div class="card" id="predTableCard" style="display:none"><div class="card-title">预测结果</div>
 <div style="overflow-x:auto"><table class="pred-table"><thead><tr><th>日期</th><th>预测价格</th><th>置信下限</th><th>置信上限</th></tr></thead><tbody id="predTableBody"></tbody></table></div></div>
@@ -772,10 +778,10 @@ function runBacktest() {
       mae/=minLen; rmse=Math.sqrt(rmse/minLen); mape=mape/minLen*100;
       var dirAcc = dirTotal>0?(dirCorrect/dirTotal*100):0;
       document.getElementById(m.el).innerHTML =
-        '<div class="bt-row"><span>MAE</span><span>'+mae.toFixed(2)+'</span></div>'+
-        '<div class="bt-row"><span>RMSE</span><span>'+rmse.toFixed(2)+'</span></div>'+
-        '<div class="bt-row"><span>MAPE</span><span>'+mape.toFixed(1)+'%</span></div>'+
-        '<div class="bt-row"><span>\u65b9\u5411\u51c6\u786e\u7387</span><span>'+dirAcc.toFixed(1)+'%</span></div>';
+        '<div class="bt-row"><span>MAE <i class="hint">i<span class="hint-text">\u5e73\u5747\u7edd\u5bf9\u8bef\u5dee\uff0c\u5355\u4f4d\u540c\u4ef7\u683c\u3002\u8d8a\u5c0f\u8bf4\u660e\u9884\u6d4b\u8d8a\u51c6</span></i></span><span>'+mae.toFixed(2)+'</span></div>'+
+        '<div class="bt-row"><span>RMSE <i class="hint">i<span class="hint-text">\u5747\u65b9\u6839\u8bef\u5dee\uff0c\u5bf9\u5927\u504f\u5dee\u60e9\u7f5a\u66f4\u91cd\u3002\u8d8a\u5c0f\u8d8a\u597d</span></i></span><span>'+rmse.toFixed(2)+'</span></div>'+
+        '<div class="bt-row"><span>MAPE <i class="hint">i<span class="hint-text">\u5e73\u5747\u767e\u5206\u6bd4\u8bef\u5dee\uff0c\u76f4\u89c2\u663e\u793a\u201c\u5e73\u5747\u504f\u4e86\u767e\u5206\u4e4b\u51e0\u201d\u3002\u8d8a\u5c0f\u8d8a\u597d</span></i></span><span>'+mape.toFixed(1)+'%</span></div>'+
+        '<div class="bt-row"><span>\u65b9\u5411\u51c6\u786e\u7387 <i class="hint">i<span class="hint-text">\u9884\u6d4b\u6da8\u8dcc\u65b9\u5411\u4e0e\u5b9e\u9645\u4e00\u81f4\u7684\u6bd4\u4f8b\u3002>50%\u8bf4\u660e\u4f18\u4e8e\u968f\u673a\u731c\u6d4b</span></i></span><span>'+dirAcc.toFixed(1)+'%</span></div>';
     } catch(e) {
       document.getElementById(m.el).textContent = '\u9519\u8bef: '+e.message;
     }
