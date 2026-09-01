@@ -75,6 +75,8 @@ body{font-family:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe 
 .badge-neutral{background:#fef3c7;color:#92400e}.badge-volatile{background:#ede9fe;color:#5b21b6}
 .data-badge{display:inline-block;margin-top:6px;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;letter-spacing:0.3px}
 .data-badge.live{background:rgba(34,197,94,0.22);color:#bbf7d0;border:1px solid rgba(34,197,94,0.5)}
+.data-badge.partial{background:rgba(245,158,11,0.24);color:#fde68a;border:1px solid rgba(245,158,11,0.58)}
+.data-badge.stale{background:rgba(239,68,68,0.22);color:#fecaca;border:1px solid rgba(239,68,68,0.55)}
 .data-badge.fallback{background:rgba(245,158,11,0.22);color:#fde68a;border:1px solid rgba(245,158,11,0.5)}
 .data-badge.loading{background:rgba(255,255,255,0.15);color:#e2e8f0;border:1px solid rgba(255,255,255,0.35)}
 .backtest-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
@@ -125,9 +127,9 @@ body{font-family:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe 
 <div id="predPanelBody" style="display:none">
 <div class="controls-row">
 <div class="control-group"><label>预测模型</label><select id="modelSelect" onchange="try{onModelChange()}catch(e){}"><option value="multifactor">多因子加权</option><option value="sma">SMA移动平均</option><option value="holt">Holt线性趋势</option></select></div>
-<div class="control-group"><label>预测期数<i class="hint">i<span class="hint-text">向前预测的期数（1-36），每期约一个交易周。建议4-12期</span></i></label><input type="number" id="horizonInput" min="1" max="36" value="12"></div>
+<div class="control-group"><label>预测期数（交易日）<i class="hint">i<span class="hint-text">向前预测的交易日数量（1-36）。例如12期表示未来12个交易日，建议先查看4-12期</span></i></label><input type="number" id="horizonInput" min="1" max="36" value="12"></div>
 <div class="control-group"><label>MA窗口<i class="hint">i<span class="hint-text">SMA模型使用的移动平均窗口大小，越大越平滑但反应越慢</span></i></label><input type="number" id="maWindowInput" min="2" max="24" value="6"></div>
-<div class="control-group"><label>置信度<i class="hint">i<span class="hint-text">置信区间的覆盖概率。95%区间更宽但更可靠，80%更窄但覆盖率低</span></i></label><select id="confidenceSelect"><option value="0.80">80%</option><option value="0.90" selected>90%</option><option value="0.95">95%</option></select></div>
+<div class="control-group"><label>置信度<i class="hint">i<span class="hint-text">置信区间的覆盖概率。95%区间更宽但更可靠，80%更窄但覆盖率低</span></i></label><select id="confidenceSelect" onchange="try{refreshConfidenceDisplay()}catch(e){console.error(e)}"><option value="0.80">80%</option><option value="0.90" selected>90%</option><option value="0.95">95%</option></select></div>
 <button class="btn btn-success" id="predictBtn" onclick="try{runPredictionClick()}catch(e){alert('预测出错: '+e.message)}">运行预测</button>
 </div>
 <div class="factor-panel" id="factorPanel">
@@ -155,7 +157,8 @@ body{font-family:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe 
 <div class="card" id="predTableCard" style="display:none"><div class="card-title">预测结果</div>
 <div style="overflow-x:auto"><table class="pred-table"><thead><tr><th>日期</th><th>预测价格</th><th>置信下限</th><th>置信上限</th></tr></thead><tbody id="predTableBody"></tbody></table></div></div>
 <div class="card"><div class="card-title">回测验证</div>
-<div style="margin-bottom:12px"><button class="btn btn-warning" onclick="try{runBacktest()}catch(e){alert('回测失败: '+e.message)}">运行回测 (后20%数据)</button></div>
+<div style="margin-bottom:8px"><button class="btn btn-warning" onclick="try{runBacktest()}catch(e){alert('回测失败: '+e.message)}">运行滚动回测 (Walk-forward)</button></div>
+<div style="margin-bottom:12px;font-size:12px;color:#64748b;line-height:1.6">按预测期数划分多轮滚动窗口，每轮只用该时点之前的数据训练、向前预测并与真实价格比对，同时统计置信区间的实际覆盖率，用于检验预测精度与区间标尺是否可信。</div>
 <div class="backtest-grid">
 <div class="bt-card"><h4>多因子加权</h4><div id="btMultifactor">点击回测按钮运行</div></div>
 <div class="bt-card"><h4>SMA移动平均</h4><div id="btSMA">点击回测按钮运行</div></div>
@@ -217,23 +220,71 @@ function mergeLiveData(ext) {
   return changed;
 }
 
+var DATA_STALE_AFTER_DAYS = 7;
+
+function dataAgeDays(dateText) {
+  if (!dateText) return null;
+  var dataDate = new Date(dateText + 'T00:00:00Z');
+  if (isNaN(dataDate.getTime())) return null;
+  var now = new Date();
+  var todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return Math.max(0, Math.floor((todayUtc - dataDate.getTime()) / 86400000));
+}
+
 function setDataBadge(mode) {
   var el = document.getElementById('dataStatusBadge');
   if (!el) return;
-  el.className = 'data-badge ' + (mode === 'live' ? 'live' : mode === 'loading' ? 'loading' : 'fallback');
   if (mode === 'live') {
     var m = LIVE_META || {};
-    var parts = ['自动更新已启用'];
-    if (m.mops_latest) parts.push('MOPS ' + m.mops_latest);
-    if (m.usgulf_latest) parts.push('US Gulf ' + m.usgulf_latest);
-    if (m.brent_latest) parts.push('Brent ' + m.brent_latest);
+    var series = [
+      {name:'MOPS', date:m.mops_latest},
+      {name:'US Gulf', date:m.usgulf_latest},
+      {name:'Brent', date:m.brent_latest}
+    ];
+    var stale = [];
+    var missing = [];
+    var details = [];
+    series.forEach(function(item){
+      var age = dataAgeDays(item.date);
+      if (age == null) missing.push(item.name);
+      else {
+        details.push(item.name + ' ' + item.date + '（距今' + age + '天）');
+        if (age > DATA_STALE_AFTER_DAYS) stale.push(item.name);
+      }
+    });
+    var isPartial = m.partial === true || missing.length > 0;
+    var statusText;
+    var statusClass;
+    if (stale.length) {
+      statusText = '数据存在延迟';
+      statusClass = 'stale';
+    } else if (isPartial) {
+      statusText = '部分数据源更新失败';
+      statusClass = 'partial';
+    } else {
+      statusText = '自动更新正常';
+      statusClass = 'live';
+    }
+    el.className = 'data-badge ' + statusClass;
+    var parts = [statusText];
+    series.forEach(function(item){ if(item.date) parts.push(item.name + ' ' + item.date); });
     el.textContent = parts.join(' · ');
-    el.title = '数据文件更新时间: ' + (m.generated_at || '未知');
+    var titleParts = [
+      '数据文件更新时间: ' + (m.generated_at || '未知'),
+      '陈旧阈值: 超过' + DATA_STALE_AFTER_DAYS + '个自然日'
+    ];
+    if (details.length) titleParts.push(details.join('；'));
+    if (stale.length) titleParts.push('延迟数据源: ' + stale.join('、'));
+    if (isPartial) titleParts.push('本次更新不完整' + (missing.length ? '；缺少: ' + missing.join('、') : ''));
+    el.title = titleParts.join('\n');
   } else if (mode === 'loading') {
+    el.className = 'data-badge loading';
     el.textContent = '正在检查数据更新…';
+    el.title = '';
   } else {
+    el.className = 'data-badge fallback';
     el.textContent = '内置数据模式（未检测到 data.json）';
-    el.title = '部署到 Netlify/GitHub Pages 后，data.json 由 GitHub Actions 每个工作日自动更新';
+    el.title = '当前未读取到在线数据文件，页面正在使用内置历史基线';
   }
 }
 
@@ -257,6 +308,8 @@ function fetchLiveData() {
 // ================================================================
 let currentTab = 'mops';
 let currentData = [];
+let currentQualityFlags = [];
+let currentQualityFlagSet = {};
 let currentChart = null;
 let lastPrediction = null;
 let chartRangeDays = 180;
@@ -272,6 +325,65 @@ function parseMOPSCompact(str) {
     var parts = p.split('|');
     return {date: new Date(parts[0]), price: parseFloat(parts[1])};
   }).filter(function(p){return !isNaN(p.price);});
+}
+
+function dateKey(date) { return date.toISOString().slice(0,10); }
+function seriesDataForTab(tab) {
+  if(tab==='mops') return LIVE_MOPS ? LIVE_MOPS : parseMOPSCompact(MOPS_COMPACT);
+  if(tab==='usgulf') return LIVE_USGULF ? LIVE_USGULF : parseMOPSCompact(USGULF_COMPACT);
+  return LIVE_BRENT ? LIVE_BRENT : parseMOPSCompact(BRENT_COMPACT);
+}
+function priceMap(data) {
+  var map = {};
+  data.forEach(function(d){ map[dateKey(d.date)] = d.price; });
+  return map;
+}
+
+// MOPS 数据质量标记：保留源价格原值，只识别“单日跳变且未被两个独立市场源证实”的点。
+// 阈值刻意设得较高，避免把 2020/2022 等真实市场冲击误标成数据异常。
+function detectDataQualityFlags(tab, data) {
+  if(tab !== 'mops' || !data || data.length < 2) return [];
+  var usMap = priceMap(seriesDataForTab('usgulf'));
+  var brMap = priceMap(seriesDataForTab('brent'));
+  var flags = [];
+  for(var i=1;i<data.length;i++){
+    var d0 = dateKey(data[i-1].date), d1 = dateKey(data[i].date);
+    var mopsRet = data[i].price/data[i-1].price - 1;
+    var refs = [], refLabels = [];
+    if(usMap[d0] > 0 && usMap[d1] > 0){
+      var ur = usMap[d1]/usMap[d0] - 1;
+      refs.push(ur); refLabels.push('US Gulf '+(ur>=0?'+':'')+(ur*100).toFixed(1)+'%');
+    }
+    if(brMap[d0] > 0 && brMap[d1] > 0){
+      var br = brMap[d1]/brMap[d0] - 1;
+      refs.push(br); refLabels.push('Brent '+(br>=0?'+':'')+(br*100).toFixed(1)+'%');
+    }
+    if(refs.length < 2) continue;
+    var refAvg = refs.reduce(function(a,b){return a+b;},0)/refs.length;
+    var refMax = Math.max.apply(null, refs.map(function(v){return Math.abs(v);}));
+    if(Math.abs(mopsRet) >= 0.20 && Math.abs(mopsRet-refAvg) >= 0.18 && refMax <= 0.15){
+      flags.push({
+        date:d1, price:data[i].price,
+        reason:'MOPS单日'+(mopsRet>=0?'+':'')+(mopsRet*100).toFixed(1)+'%，但'+refLabels.join('、')+'，需核验源数据'
+      });
+    }
+  }
+  return flags;
+}
+function qualityInvalidMask(data) {
+  var set = currentQualityFlagSet || {};
+  return (data || []).map(function(d){ return !!set[dateKey(d.date)]; });
+}
+function isQualityFlaggedDate(date) {
+  return !!(currentQualityFlagSet && currentQualityFlagSet[dateKey(date)]);
+}
+function qualityFilteredReturns(data, startIndex) {
+  var out = [];
+  for(var i=Math.max(1,startIndex || 1);i<data.length;i++){
+    if(isQualityFlaggedDate(data[i-1].date) || isQualityFlaggedDate(data[i].date)) continue;
+    if(data[i-1].price > 0) out.push((data[i].price-data[i-1].price)/data[i-1].price);
+  }
+  return out;
 }
 function downsampleWeekly(data) {
   if(data.length < 10) return data.slice();
@@ -305,9 +417,10 @@ function switchTab(tab) {
   loadBuiltinData();
 }
 function loadBuiltinData() {
-  if(currentTab==='mops') currentData = LIVE_MOPS ? LIVE_MOPS.slice() : parseMOPSCompact(MOPS_COMPACT);
-  else if(currentTab==='usgulf') currentData = LIVE_USGULF ? LIVE_USGULF.slice() : parseMOPSCompact(USGULF_COMPACT);
-  else currentData = LIVE_BRENT ? LIVE_BRENT.slice() : parseMOPSCompact(BRENT_COMPACT);
+  currentData = seriesDataForTab(currentTab).slice();
+  currentQualityFlags = detectDataQualityFlags(currentTab, currentData);
+  currentQualityFlagSet = {};
+  currentQualityFlags.forEach(function(f){ currentQualityFlagSet[f.date] = f; });
   lastPrediction = null;
   document.getElementById('predTableCard').style.display = 'none';
   renderChart(null);
@@ -359,11 +472,10 @@ function updateStats() {
   var avg = prices.reduce(function(a,b){return a+b;},0)/n;
   var high = Math.max.apply(null,prices);
   var low = Math.min.apply(null,prices);
-  var returns = [];
-  for(var i=1;i<n;i++) returns.push((prices[i]-prices[i-1])/prices[i-1]);
+  var returns = qualityFilteredReturns(currentData, 1);
   var meanR = returns.length ? returns.reduce(function(a,b){return a+b;},0)/returns.length : 0;
   var varR = returns.length ? returns.reduce(function(a,r){return a+(r-meanR)*(r-meanR);},0)/returns.length : 0;
-  var periodsPerYear = currentTab==='mops' ? 252 : 12;
+  var periodsPerYear = TAB_FREQ[currentTab]==='daily' ? 252 : 12;
   var annVol = Math.sqrt(varR * periodsPerYear) * 100;
   document.getElementById('statLatest').textContent = latest.toFixed(2);
   document.getElementById('statAvg').textContent = avg.toFixed(2);
@@ -388,10 +500,9 @@ function updateRegime() {
   var rsi = 100 - 100/(1+rs);
   var lookback = Math.min(20, n-1);
   var momentum = ((prices[n-1]-prices[n-1-lookback])/prices[n-1-lookback]*100);
-  var returns = [];
-  for(var i=Math.max(1,n-30);i<n;i++) returns.push((prices[i]-prices[i-1])/prices[i-1]);
-  var meanR = returns.reduce(function(a,b){return a+b;},0)/returns.length;
-  var vol = Math.sqrt(returns.reduce(function(a,r){return a+(r-meanR)*(r-meanR);},0)/returns.length)*100;
+  var returns = qualityFilteredReturns(currentData, Math.max(1,n-30));
+  var meanR = returns.length ? returns.reduce(function(a,b){return a+b;},0)/returns.length : 0;
+  var vol = returns.length ? Math.sqrt(returns.reduce(function(a,r){return a+(r-meanR)*(r-meanR);},0)/returns.length)*100 : 0;
   var state, badge;
   if(rsi>65 && momentum>5){state='\u4e0a\u5347\u8d8b\u52bf';badge='badge-up';}
   else if(rsi<35 && momentum<-5){state='\u4e0b\u964d\u8d8b\u52bf';badge='badge-down';}
@@ -406,6 +517,104 @@ function updateRegime() {
 // ================================================================
 //  HELPER FUNCTIONS
 // ================================================================
+// 置信区间校准工具：用历史“一步预测残差”的经验分布刻度区间宽度，
+// 取代固定百分比（如 ±5%/±12.5%）的拍脑袋做法。
+var BAND_LEVELS = [
+  {key:'p2_5', q:0.025}, {key:'p5', q:0.05}, {key:'p10', q:0.10}, {key:'p25', q:0.25},
+  {key:'p75', q:0.75}, {key:'p90', q:0.90}, {key:'p95', q:0.95}, {key:'p97_5', q:0.975}
+];
+var NORMAL_Z = {p2_5:-1.96, p5:-1.645, p10:-1.282, p25:-0.674, p75:0.674, p90:1.282, p95:1.645, p97_5:1.96};
+
+function quantileOf(sorted, q) {
+  if(!sorted.length) return 0;
+  var pos = (sorted.length - 1) * q;
+  var lo = Math.floor(pos), hi = Math.ceil(pos);
+  if(lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+// 滚动日波动率序列：vol[i] = 截至第 i 个交易日、最近 win 天收益率的标准差
+// 用增量求和实现 O(n)，供误差缩放使用
+var VOL_WIN = 60;
+var VOL_SCALE_MIN = 0.25, VOL_SCALE_MAX = 4;
+function rollingVolSeries(prices, win, invalidMask) {
+  var n = prices.length;
+  var rets = new Array(n);
+  rets[0] = null;
+  for(var i=1;i<n;i++){
+    var invalid = invalidMask && (invalidMask[i] || invalidMask[i-1]);
+    rets[i] = invalid || !(prices[i-1] > 0) ? null : (prices[i]-prices[i-1])/prices[i-1];
+  }
+  var vol = new Array(n);
+  var sum = 0, sumSq = 0, cnt = 0;
+  for(var i=1;i<n;i++){
+    if(rets[i] != null && isFinite(rets[i])){
+      sum += rets[i]; sumSq += rets[i]*rets[i]; cnt++;
+    }
+    if(i-win >= 1){
+      var drop = rets[i-win];
+      if(drop != null && isFinite(drop)){
+        sum -= drop; sumSq -= drop*drop; cnt--;
+      }
+    }
+    if(cnt > 0){
+      var mean = sum/cnt;
+      var varr = Math.max(0, sumSq/cnt - mean*mean);
+      vol[i] = Math.sqrt(varr);
+    } else {
+      vol[i] = i>1 ? vol[i-1] : 0;
+    }
+  }
+  vol[0] = vol[1] || 0;
+  return vol;
+}
+
+// 把历史某个时点的误差缩放到“当前波动水平”：
+// 2021/2024/2025 年日波动率约 1.7%，2026 年一度接近 9%，
+// 若平等使用所有历史误差，会明显低估当前的不确定性。
+function volScaleFactor(vol, originIdx, volNow) {
+  var v = vol[originIdx];
+  if(!(v > 0) || !(volNow > 0)) return 1;
+  return Math.max(VOL_SCALE_MIN, Math.min(VOL_SCALE_MAX, volNow / v));
+}
+
+// relResiduals: 同一预测步长下的历史相对误差（实际值/预测值 - 1，已按波动率缩放）
+// 返回各分位点相对中位数的偏移比例，正负分别对应上下限
+function residualBandOffsets(relResiduals) {
+  var clean = (relResiduals || []).filter(function(v){ return isFinite(v); });
+  var out = {};
+  if(clean.length >= 20) {
+    var sorted = clean.slice().sort(function(a,b){ return a-b; });
+    var med = quantileOf(sorted, 0.5);
+    BAND_LEVELS.forEach(function(L){ out[L.key] = quantileOf(sorted, L.q) - med; });
+    return out;
+  }
+  var sigma = 0;
+  if(clean.length >= 3) {
+    var mean = clean.reduce(function(a,b){return a+b;},0)/clean.length;
+    sigma = Math.sqrt(clean.reduce(function(a,r){return a+(r-mean)*(r-mean);},0)/(clean.length-1));
+  }
+  if(!(sigma > 0)) sigma = 0.02;
+  BAND_LEVELS.forEach(function(L){ out[L.key] = NORMAL_Z[L.key] * sigma; });
+  return out;
+}
+
+// residualsByStep[t] = 该模型“向前t步”的历史相对误差样本
+// 每个步长各自校准，不再假设误差按 √步数 增长
+function offsetsPerStep(residualsByStep, horizon) {
+  var arr = [];
+  for(var t=1;t<=horizon;t++) arr[t] = residualBandOffsets(residualsByStep[t] || []);
+  return arr;
+}
+
+function attachBands(point, pred, offsets) {
+  point.p50 = pred;
+  BAND_LEVELS.forEach(function(L){
+    point[L.key] = Math.max(0, pred * (1 + offsets[L.key]));
+  });
+  return point;
+}
+
 function gaussRandom() {
   var u=0,v=0;
   while(u===0)u=Math.random();
@@ -414,7 +623,15 @@ function gaussRandom() {
 }
 function advanceDate(date, steps, freq) {
   var d = new Date(date);
-  if(freq==='daily'){d.setDate(d.getDate()+steps*7);}
+  if(freq==='daily'){
+    // 日频数据：按交易日推进（跳过周六、周日），与按日频拟合的波动率保持同一量纲
+    var left = steps;
+    while(left > 0){
+      d.setDate(d.getDate() + 1);
+      var wd = d.getDay();
+      if(wd !== 0 && wd !== 6) left--;
+    }
+  }
   else {d.setMonth(d.getMonth()+steps);}
   return d;
 }
@@ -422,7 +639,9 @@ function advanceDate(date, steps, freq) {
 // ================================================================
 //  PREDICTION MODELS
 // ================================================================
-function predictMultifactor(data, horizon) {
+// 多因子模型拆成「拟合参数」与「点预测」两步，
+// 便于用滚动起点在历史上复算同一模型的真实误差，从而校准置信区间。
+function multifactorFit(data) {
   var prices = data.map(function(d){return d.price;});
   var n = prices.length;
   if(n<30) throw new Error('Data insufficient, need 30+ points');
@@ -435,88 +654,127 @@ function predictMultifactor(data, horizon) {
   var sGeo = parseInt(document.getElementById('sGeo').value)/10;
   var sSupply = parseInt(document.getElementById('sSupply').value)/10;
   var sEcon = parseInt(document.getElementById('sEcon').value)/10;
-  var weekly = downsampleWeekly(data);
-  var wp = weekly.map(function(d){return d.price;});
-  var wn = wp.length;
-  // Momentum
-  var mom10 = wn>=10 ? (wp[wn-1]-wp[wn-10])/wp[wn-10] : 0;
-  var mom30 = wn>=30 ? (wp[wn-1]-wp[wn-30])/wp[wn-30] : mom10;
-  var mom60 = wn>=60 ? (wp[wn-1]-wp[wn-60])/wp[wn-60] : mom30;
-  var momentumSignal = (mom10*0.5+mom30*0.3+mom60*0.2)*3;
-  var accel = wn>=20 ? ((wp[wn-1]-wp[wn-10])/wp[wn-10]-(wp[wn-10]-wp[wn-20])/wp[wn-20]) : 0;
-  var momFinal = momentumSignal + accel*0.5;
-  var momDamped = momFinal * Math.exp(-0.02);
-  // Mean Reversion (Ornstein-Uhlenbeck)
-  var ma60sum=0, ma60count=Math.min(60,wn);
-  for(var j=wn-ma60count;j<wn;j++) ma60sum+=wp[j];
-  var ma60 = ma60sum/ma60count;
-  var bestKappa=0.08, bestScore=Infinity;
-  for(var k=0.02;k<=0.50;k+=0.02){
-    var sse=0;
-    for(var i=Math.max(1,wn-30);i<wn;i++){
-      var pred = wp[i-1]+k*(ma60-wp[i-1]);
-      sse += (wp[i]-pred)*(wp[i]-pred);
-    }
-    if(sse<bestScore){bestScore=sse;bestKappa=Math.max(0.08,k);}
+  // 数据为日频，所有参数一律按“每个交易日”口径在原始日频序列上估计
+  // Momentum：把不同回看窗口的累计涨跌折算成单个交易日的平均收益率
+  function lookbackRet(lb){ return n > lb ? (prices[n-1]-prices[n-1-lb])/prices[n-1-lb] : null; }
+  var r10 = lookbackRet(10), r30 = lookbackRet(30), r60 = lookbackRet(60);
+  var momAcc = 0, momW = 0;
+  if(r10 != null){ momAcc += (r10/10)*0.5; momW += 0.5; }
+  if(r30 != null){ momAcc += (r30/30)*0.3; momW += 0.3; }
+  if(r60 != null){ momAcc += (r60/60)*0.2; momW += 0.2; }
+  var momPerStep = momW > 0 ? momAcc/momW : 0;
+  // 加速度：近10个交易日相对前10个交易日的变化，同样折算到单日
+  if(n > 21){
+    var recentRet = (prices[n-1]-prices[n-11])/prices[n-11];
+    var priorRet = (prices[n-11]-prices[n-21])/prices[n-21];
+    momPerStep += ((recentRet - priorRet)/10) * 0.3;
   }
-  // Seasonal
-  var monthlyAvg = {};
+  // 单日动量限幅 ±1.5%，避免极端行情被线性外推放大
+  momPerStep = Math.max(-0.015, Math.min(0.015, momPerStep));
+  // Mean Reversion (Ornstein-Uhlenbeck)：日频拟合 kappa，多步用收敛公式而非线性外推
+  var ma60count = Math.min(60, n);
+  var ma60sum = 0;
+  for(var j=n-ma60count;j<n;j++) ma60sum += prices[j];
+  var ma60 = ma60sum/ma60count;
+  var bestKappa = 0.02, bestScore = Infinity;
+  for(var k=0.005;k<=0.20;k+=0.005){
+    var sse = 0;
+    for(var i=Math.max(1,n-120);i<n;i++){
+      var pred1 = prices[i-1]+k*(ma60-prices[i-1]);
+      sse += (prices[i]-pred1)*(prices[i]-pred1);
+    }
+    if(sse<bestScore){bestScore=sse;bestKappa=k;}
+  }
+  bestKappa = Math.max(0.005, Math.min(0.20, bestKappa));
+  // Seasonal：各月历史均价
+  var monthlyAgg = {};
   for(var i=0;i<data.length;i++){
     var m = data[i].date.getMonth();
-    if(!monthlyAvg[m]) monthlyAvg[m]={sum:0,count:0};
-    monthlyAvg[m].sum += data[i].price;
-    monthlyAvg[m].count++;
+    if(!monthlyAgg[m]) monthlyAgg[m]={sum:0,count:0};
+    monthlyAgg[m].sum += data[i].price;
+    monthlyAgg[m].count++;
   }
-  Object.keys(monthlyAvg).forEach(function(k){monthlyAvg[k]=monthlyAvg[k].sum/monthlyAvg[k].count;});
+  var monthlyAvg = {};
+  Object.keys(monthlyAgg).forEach(function(k){ monthlyAvg[k] = monthlyAgg[k].sum/monthlyAgg[k].count; });
   var globalAvg = prices.reduce(function(a,b){return a+b;},0)/n;
-  // Monte Carlo GBM - 1000 paths
-  var mcReturns = [];
-  for(var i=Math.max(1,wn-60);i<wn;i++) mcReturns.push((wp[i]-wp[i-1])/wp[i-1]);
-  var mu = mcReturns.reduce(function(a,b){return a+b;},0)/mcReturns.length;
-  var mcVar = mcReturns.reduce(function(a,r){return a+(r-mu)*(r-mu);},0)/mcReturns.length;
-  var sigma = Math.sqrt(mcVar);
-  var drift = mu * 1.5;
-  var nPaths = 1000;
-  var paths = [];
-  for(var p=0;p<nPaths;p++){
-    var price = lastPrice;
-    var path = [price];
-    for(var t=0;t<horizon;t++){
-      var z = gaussRandom();
-      price = price * Math.exp((drift - sigma*sigma/2) + sigma*z);
-      path.push(price);
-    }
-    paths.push(path);
+  // Volatility：最近120个交易日收益率；疑似异常点两侧的收益率不参与估计
+  var rets = qualityFilteredReturns(data, Math.max(1,n-120));
+  var mu = rets.length ? rets.reduce(function(a,b){return a+b;},0)/rets.length : 0;
+  var variance = rets.length ? rets.reduce(function(a,r){return a+(r-mu)*(r-mu);},0)/rets.length : 0;
+  return {
+    prices: prices, n: n, lastPrice: lastPrice, lastDate: data[n-1].date,
+    momPerStep: momPerStep, ma60: ma60, kappa: bestKappa,
+    monthlyAvg: monthlyAvg, globalAvg: globalAvg,
+    sigma: Math.sqrt(variance),
+    // 单日漂移限幅 ±1%，不再做1.5倍放大（该系数源自周频口径）
+    drift: Math.max(-0.01, Math.min(0.01, mu)),
+    w: {mom:wMom, mr:wMR, sea:wSea, vol:wVol, sum:wSum},
+    scenario: sGeo*0.02 + sSupply*0.015 + sEcon*0.01
+  };
+}
+
+function multifactorPoint(fit, t, horizon, futureMonth) {
+  var lastPrice = fit.lastPrice;
+  // 动量按交易日累积并随步数衰减，长周期不会无限线性外推
+  var momComp = lastPrice * (1 + fit.momPerStep * t * Math.exp(-0.01*t));
+  // 均值回归：OU 多步收敛，最多回到 ma60 而不会越过
+  var mrComp = lastPrice + (fit.ma60 - lastPrice) * (1 - Math.pow(1-fit.kappa, t));
+  var seaComp = 0;
+  if(fit.monthlyAvg[futureMonth] && fit.globalAvg > 0){
+    // 季节性按约一个月渐入，短期预测不施加整月偏移
+    seaComp = lastPrice * ((fit.monthlyAvg[futureMonth]/fit.globalAvg - 1) * 0.3) * Math.min(t/21, 1);
   }
-  // Generate forecast
-  var forecast = [];
-  var lastDate = data[n-1].date;
-  var freq = TAB_FREQ[currentTab];
-  for(var t=1;t<=horizon;t++){
-    var momComp = lastPrice * (1 + momDamped * t/horizon);
-    var mrComp = lastPrice + bestKappa * t * (ma60 - lastPrice);
-    var seaComp = 0;
-    var futureDate = advanceDate(lastDate, t, freq);
-    var month = futureDate.getMonth();
-    if(monthlyAvg[month] && globalAvg > 0){
-      seaComp = lastPrice * ((monthlyAvg[month]/globalAvg - 1) * 0.3);
+  // 波动率分量取几何布朗运动的中位数解析解（等价于蒙特卡洛中位数，但结果可复现）
+  var volComp = lastPrice * Math.exp((fit.drift - fit.sigma*fit.sigma/2) * t);
+  var pred = (fit.w.mom*momComp + fit.w.mr*mrComp + fit.w.sea*(lastPrice+seaComp) + fit.w.vol*volComp) / fit.w.sum;
+  var scenarioMod = fit.scenario * Math.min(t/horizon, 1) * Math.exp(-0.01*t);
+  return Math.max(0, pred * (1 + scenarioMod));
+}
+
+// 用滚动起点复算同一模型，按预测步长收集真实误差
+var MF_BAND_ORIGINS = 40;
+var MF_BAND_MIN_TRAIN = 120;
+function multifactorBandOffsets(data, horizon, freq) {
+  var n = data.length;
+  var prices = data.map(function(d){return d.price;});
+  var invalidMask = qualityInvalidMask(data);
+  var vol = rollingVolSeries(prices, VOL_WIN, invalidMask);
+  var volNow = vol[n-1];
+  var residualsByStep = {};
+  var lastTrain = n - horizon;
+  if(lastTrain > MF_BAND_MIN_TRAIN){
+    var span = lastTrain - MF_BAND_MIN_TRAIN;
+    var stride = Math.max(1, Math.floor(span / MF_BAND_ORIGINS));
+    for(var end=lastTrain; end>=MF_BAND_MIN_TRAIN; end-=stride){
+      if(invalidMask[end-1]) continue;
+      var train = data.slice(0, end);
+      var fit;
+      try { fit = multifactorFit(train); } catch(e){ continue; }
+      var scale = volScaleFactor(vol, end-1, volNow);
+      for(var t=1;t<=horizon;t++){
+        var actualIdx = end-1+t;
+        var actual = data[actualIdx];
+        if(!actual) break;
+        if(invalidMask[actualIdx]) continue;
+        var pred = multifactorPoint(fit, t, horizon, advanceDate(fit.lastDate, t, freq).getMonth());
+        if(!(pred > 0)) continue;
+        if(!residualsByStep[t]) residualsByStep[t] = [];
+        residualsByStep[t].push((actual.price/pred - 1) * scale);
+      }
     }
-    var stepPrices = paths.map(function(p){return p[t];});
-    stepPrices.sort(function(a,b){return a-b;});
-    var p5raw = stepPrices[Math.floor(nPaths*0.05)];
-    var p25raw = stepPrices[Math.floor(nPaths*0.25)];
-    var p50raw = stepPrices[Math.floor(nPaths*0.50)];
-    var p75raw = stepPrices[Math.floor(nPaths*0.75)];
-    var p95raw = stepPrices[Math.floor(nPaths*0.95)];
-    var predicted = (wMom*momComp + wMR*mrComp + wSea*(lastPrice+seaComp) + wVol*p50raw) / wSum;
-    var scenarioMod = (sGeo*0.02 + sSupply*0.015 + sEcon*0.01) * Math.min(t/horizon, 1) * Math.exp(-0.01*t);
-    predicted *= (1 + scenarioMod);
-    // Re-center CI around predicted using MC spread ratios
-    var ratio5 = p50raw > 0 ? p5raw / p50raw : 0.9;
-    var ratio25 = p50raw > 0 ? p25raw / p50raw : 0.95;
-    var ratio75 = p50raw > 0 ? p75raw / p50raw : 1.05;
-    var ratio95 = p50raw > 0 ? p95raw / p50raw : 1.1;
-    forecast.push({date:futureDate, price:predicted, p5:predicted*ratio5, p25:predicted*ratio25, p50:predicted, p75:predicted*ratio75, p95:predicted*ratio95});
+  }
+  return offsetsPerStep(residualsByStep, horizon);
+}
+
+function predictMultifactor(data, horizon) {
+  var freq = TAB_FREQ[currentTab];
+  var fit = multifactorFit(data);
+  var offsets = multifactorBandOffsets(data, horizon, freq);
+  var forecast = [];
+  for(var t=1;t<=horizon;t++){
+    var futureDate = advanceDate(fit.lastDate, t, freq);
+    var pred = multifactorPoint(fit, t, horizon, futureDate.getMonth());
+    forecast.push(attachBands({date:futureDate, price:pred}, pred, offsets[t]));
   }
   return forecast;
 }
@@ -529,9 +787,34 @@ function predictSMA(data, horizon) {
   var avg = slice.reduce(function(a,b){return a+b;},0)/slice.length;
   var lastDate = data[n-1].date;
   var freq = TAB_FREQ[currentTab];
+  // 置信区间按“预测步长”分别统计历史误差：对每个 t，用所有可用的历史起点
+  // 复算该起点向前 t 步的预测值，取相对误差（实际/预测-1），
+  // 再按“当时波动率 → 当前波动率”缩放，使历史平静期的误差不会低估当前风险。
+  // 不再假设误差随 √t 增长，也不使用固定百分比。
+  var invalidMask = qualityInvalidMask(data);
+  var vol = rollingVolSeries(prices, VOL_WIN, invalidMask);
+  var volNow = vol[n-1];
+  var residualsByStep = {};
+  for(var t=1;t<=horizon;t++) residualsByStep[t] = [];
+  for(var o=w-1;o<n-1;o++){
+    var badWindow = false;
+    for(var k=Math.max(0,o-w+1);k<=o;k++) if(invalidMask[k]) { badWindow=true; break; }
+    if(badWindow) continue;
+    var winSum = 0;
+    for(var j=o-w+1;j<=o;j++) winSum += prices[j];
+    var predAtO = winSum/w;
+    if(!(predAtO > 0)) continue;
+    var scale = volScaleFactor(vol, o, volNow);
+    for(var t2=1;t2<=horizon;t2++){
+      if(o+t2 >= n) break;
+      if(invalidMask[o+t2]) continue;
+      residualsByStep[t2].push((prices[o+t2]/predAtO - 1) * scale);
+    }
+  }
+  var offsets = offsetsPerStep(residualsByStep, horizon);
   var forecast = [];
-  for(var t=1;t<=horizon;t++){
-    forecast.push({date:advanceDate(lastDate,t,freq),price:avg,p5:avg*0.9,p25:avg*0.95,p50:avg,p75:avg*1.05,p95:avg*1.1});
+  for(var t3=1;t3<=horizon;t3++){
+    forecast.push(attachBands({date:advanceDate(lastDate,t3,freq), price:avg}, avg, offsets[t3]));
   }
   return forecast;
 }
@@ -553,21 +836,50 @@ function predictHolt(data, horizon) {
       if(sse<bestSSE){bestSSE=sse;bestA=a;bestB=b;}
     }
   }
+  // 一次递推同时完成状态更新与逐步长误差收集：
+  // 在每个历史起点 o 上，用当时的 level/trend 外推 t 步，取相对误差并按波动率缩放
+  var invalidMask = qualityInvalidMask(data);
+  var vol = rollingVolSeries(prices, VOL_WIN, invalidMask);
+  var volNow = vol[n-1];
+  var residualsByStep = {};
+  for(var t=1;t<=horizon;t++) residualsByStep[t] = [];
   var level=prices[0], trend=prices[1]-prices[0];
   for(var i=1;i<n;i++){
     var nl = bestA*prices[i]+(1-bestA)*(level+trend);
     var nt = bestB*(nl-level)+(1-bestB)*trend;
     level=nl; trend=nt;
+    if(invalidMask[i]) continue;
+    var scale = volScaleFactor(vol, i, volNow);
+    for(var t2=1;t2<=horizon;t2++){
+      if(i+t2 >= n) break;
+      if(invalidMask[i+t2]) continue;
+      var predAtI = level + trend*t2;
+      if(!(predAtI > 0)) continue;
+      residualsByStep[t2].push((prices[i+t2]/predAtI - 1) * scale);
+    }
   }
   var lastDate = data[n-1].date;
   var freq = TAB_FREQ[currentTab];
+  var offsets = offsetsPerStep(residualsByStep, horizon);
   var forecast = [];
-  for(var t=1;t<=horizon;t++){
-    var pred = level + trend*t;
-    var spread = Math.abs(trend)*t*0.5;
-    forecast.push({date:advanceDate(lastDate,t,freq),price:Math.max(0,pred),p5:pred-spread*2,p25:pred-spread,p50:pred,p75:pred+spread,p95:pred+spread*2});
+  for(var t3=1;t3<=horizon;t3++){
+    var pred = Math.max(0, level + trend*t3);
+    forecast.push(attachBands({date:advanceDate(lastDate,t3,freq), price:pred}, pred, offsets[t3]));
   }
   return forecast;
+}
+
+function getConfidenceKeys() {
+  var ci = parseFloat(document.getElementById('confidenceSelect').value);
+  if(ci >= 0.95) return {lo:'p2_5', hi:'p97_5'};
+  if(ci >= 0.90) return {lo:'p5', hi:'p95'};
+  return {lo:'p10', hi:'p90'};
+}
+
+function refreshConfidenceDisplay() {
+  if (!lastPrediction || !lastPrediction.forecast) return;
+  renderChart(lastPrediction.forecast);
+  renderPredTable(lastPrediction.forecast);
 }
 
 // ================================================================
@@ -665,6 +977,27 @@ function renderChart(forecast) {
     fill: false,
     tension: 0.1
   }];
+  if(currentQualityFlags.length){
+    var visibleStart = histSource.length ? histSource[0].date : null;
+    var visibleEnd = histSource.length ? histSource[histSource.length-1].date : null;
+    var flaggedData = currentQualityFlags.filter(function(f){
+      var d = new Date(f.date);
+      return (!visibleStart || d>=visibleStart) && (!visibleEnd || d<=visibleEnd);
+    }).map(function(f){ return {x:new Date(f.date),y:f.price,reason:f.reason}; });
+    if(flaggedData.length){
+      datasets.push({
+        label:'\u7591\u4f3c\u5f02\u5e38\uff08\u539f\u503c\u4fdd\u7559\uff09',
+        data:flaggedData,
+        showLine:false,
+        borderColor:'#f59e0b',
+        backgroundColor:'#f59e0b',
+        pointBorderColor:'#ffffff',
+        pointBorderWidth:2,
+        pointRadius:6,
+        pointHoverRadius:8
+      });
+    }
+  }
   if(forecast && forecast.length) {
     var lastHist = currentData[currentData.length-1];
     var predData = [{x:lastHist.date,y:lastHist.price}].concat(forecast.map(function(f){return {x:f.date,y:f.price};}));
@@ -679,9 +1012,9 @@ function renderChart(forecast) {
       fill: false,
       tension: 0.2
     });
-    var ci = parseFloat(document.getElementById('confidenceSelect').value);
-    var loKey = ci<=0.80?'p25':ci<=0.90?'p5':'p5';
-    var hiKey = ci<=0.80?'p75':ci<=0.90?'p95':'p95';
+    var ciKeys = getConfidenceKeys();
+    var loKey = ciKeys.lo;
+    var hiKey = ciKeys.hi;
     var bandLo = [{x:lastHist.date,y:lastHist.price}].concat(forecast.map(function(f){return {x:f.date,y:f[loKey]};}));
     var bandHi = [{x:lastHist.date,y:lastHist.price}].concat(forecast.map(function(f){return {x:f.date,y:f[hiKey]};}));
     datasets.push({
@@ -716,7 +1049,10 @@ function renderChart(forecast) {
       interaction: {mode:'index',intersect:false},
       plugins: {
         legend: {display:true,position:'top',labels:{usePointStyle:true,padding:12}},
-        tooltip: {callbacks:{label:function(c){return c.dataset.label+': '+c.parsed.y.toFixed(2)+' '+TAB_UNITS[currentTab];}}}
+        tooltip: {callbacks:{label:function(c){
+          if(c.raw && c.raw.reason) return ['疑似异常: '+c.parsed.y.toFixed(2)+' '+TAB_UNITS[currentTab], c.raw.reason];
+          return c.dataset.label+': '+c.parsed.y.toFixed(2)+' '+TAB_UNITS[currentTab];
+        }}}
       },
       scales: {
         x: {type:'time',time:{tooltipFormat:'yyyy-MM-dd'},title:{display:true,text:'\u65e5\u671f'},grid:{display:false}},
@@ -731,9 +1067,9 @@ function renderChart(forecast) {
 // ================================================================
 function renderPredTable(forecast) {
   var tbody = document.getElementById('predTableBody');
-  var ci = parseFloat(document.getElementById('confidenceSelect').value);
-  var loKey = ci<=0.80?'p25':ci<=0.90?'p5':'p5';
-  var hiKey = ci<=0.80?'p75':ci<=0.90?'p95':'p95';
+  var ciKeys = getConfidenceKeys();
+  var loKey = ciKeys.lo;
+  var hiKey = ciKeys.hi;
   tbody.innerHTML = forecast.map(function(f) {
     var d = f.date.toISOString().slice(0,10);
     return '<tr><td>'+d+'</td><td>'+f.price.toFixed(2)+'</td><td>'+f[loKey].toFixed(2)+'</td><td>'+f[hiKey].toFixed(2)+'</td></tr>';
@@ -741,51 +1077,105 @@ function renderPredTable(forecast) {
 }
 
 // ================================================================
-//  BACKTEST
+//  BACKTEST (walk-forward / 滚动回测)
 // ================================================================
+var BT_MAX_FOLDS = 6;
+var BT_MIN_TRAIN = 60;
+
 function runBacktest() {
-  if(currentData.length<30){alert('\u6570\u636e\u4e0d\u8db3\uff0c\u81f3\u5c11\u9700\u898130\u4e2a\u6570\u636e\u70b9');return;}
-  var splitIdx = Math.floor(currentData.length * 0.8);
-  var trainData = currentData.slice(0, splitIdx);
-  var testData = currentData.slice(splitIdx);
-  var horizon = testData.length;
-  if(horizon<3){alert('\u6d4b\u8bd5\u96c6\u592a\u5c0f');return;}
+  if(currentData.length < BT_MIN_TRAIN + 6){
+    alert('\u6570\u636e\u4e0d\u8db3\uff0c\u6eda\u52a8\u56de\u6d4b\u81f3\u5c11\u9700\u8981' + (BT_MIN_TRAIN+6) + '\u4e2a\u6570\u636e\u70b9');
+    return;
+  }
+  var overlay = document.getElementById('loadingOverlay');
+  if(overlay) overlay.classList.add('visible');
+  setTimeout(function(){
+    try { runBacktestCore(); }
+    catch(e){ alert('\u56de\u6d4b\u5931\u8d25: ' + e.message); }
+    finally { if(overlay) overlay.classList.remove('visible'); }
+  }, 30);
+}
+
+function runBacktestCore() {
+  var n = currentData.length;
+  var h = parseInt(document.getElementById('horizonInput').value) || 12;
+  h = Math.max(3, Math.min(12, h));
+  var folds = Math.min(BT_MAX_FOLDS, Math.floor((n - BT_MIN_TRAIN) / h));
+  if(folds < 1){ alert('\u6570\u636e\u4e0d\u8db3\uff0c\u65e0\u6cd5\u5212\u5206\u6eda\u52a8\u7a97\u53e3'); return; }
+
   var models = [
-    {name:'multifactor',fn:function(){return predictMultifactor(trainData,horizon);},el:'btMultifactor'},
-    {name:'sma',fn:function(){return predictSMA(trainData,horizon);},el:'btSMA'},
-    {name:'holt',fn:function(){return predictHolt(trainData,horizon);},el:'btHolt'}
+    {name:'multifactor', fn:predictMultifactor, el:'btMultifactor'},
+    {name:'sma', fn:predictSMA, el:'btSMA'},
+    {name:'holt', fn:predictHolt, el:'btHolt'}
   ];
-  for(var mi=0;mi<models.length;mi++){
-    var m = models[mi];
+  var covPairs = [
+    {label:'80%', lo:'p10', hi:'p90'},
+    {label:'90%', lo:'p5', hi:'p95'},
+    {label:'95%', lo:'p2_5', hi:'p97_5'}
+  ];
+
+  models.forEach(function(m){
     try {
-      var forecast = m.fn();
-      var actualPrices = testData.map(function(d){return d.price;});
-      var predPrices = forecast.slice(0,horizon).map(function(f){return f.price;});
-      var minLen = Math.min(actualPrices.length, predPrices.length);
-      var mae=0,rmse=0,mape=0,dirCorrect=0,dirTotal=0;
-      for(var i=0;i<minLen;i++){
-        var err = Math.abs(predPrices[i]-actualPrices[i]);
-        mae += err;
-        rmse += err*err;
-        mape += err/actualPrices[i];
-        if(i>0){
-          dirTotal++;
-          var actualDir = actualPrices[i]>actualPrices[i-1]?1:-1;
-          var predDir = predPrices[i]>predPrices[i-1]?1:-1;
-          if(actualDir===predDir) dirCorrect++;
+      var absSum=0, sqSum=0, pctSum=0, cnt=0;
+      var dirCorrect=0, dirTotal=0;
+      var covHit={'80%':0,'90%':0,'95%':0};
+      var width80Sum=0;
+      var usedFolds=0;
+
+      for(var f=folds; f>=1; f--){
+        var trainEnd = n - f*h;
+        if(trainEnd < BT_MIN_TRAIN) continue;
+        var train = currentData.slice(0, trainEnd);
+        var test = currentData.slice(trainEnd, trainEnd + h);
+        if(test.length < 2) continue;
+        var forecast = m.fn(train, test.length);
+        usedFolds++;
+        for(var i=0;i<test.length;i++){
+          var actual = test[i].price;
+          var pred = forecast[i].price;
+          var err = Math.abs(pred - actual);
+          absSum += err; sqSum += err*err;
+          if(actual > 0) pctSum += err/actual;
+          cnt++;
+          covPairs.forEach(function(cp){
+            if(actual >= forecast[i][cp.lo] && actual <= forecast[i][cp.hi]) covHit[cp.label]++;
+          });
+          width80Sum += (forecast[i].p90 - forecast[i].p10) / (actual > 0 ? actual : 1);
+          if(i>0){
+            dirTotal++;
+            var aDir = test[i].price > test[i-1].price ? 1 : -1;
+            var pDir = forecast[i].price > forecast[i-1].price ? 1 : -1;
+            if(aDir === pDir) dirCorrect++;
+          }
         }
       }
-      mae/=minLen; rmse=Math.sqrt(rmse/minLen); mape=mape/minLen*100;
-      var dirAcc = dirTotal>0?(dirCorrect/dirTotal*100):0;
+      if(!cnt) throw new Error('\u6ca1\u6709\u6709\u6548\u7684\u56de\u6d4b\u7a97\u53e3');
+
+      var mae = absSum/cnt;
+      var rmse = Math.sqrt(sqSum/cnt);
+      var mape = pctSum/cnt*100;
+      var dirAcc = dirTotal>0 ? dirCorrect/dirTotal*100 : 0;
+      var width80 = width80Sum/cnt*100;
+
+      function covRow(cp){
+        var rate = covHit[cp.label]/cnt*100;
+        var target = parseFloat(cp.label);
+        var cls = Math.abs(rate-target) <= 10 ? '' : (rate < target ? ' style="color:#dc2626"' : ' style="color:#d97706"');
+        return '<div class="bt-row"><span>' + cp.label + '\u533a\u95f4\u8986\u76d6\u7387 <i class="hint">i<span class="hint-text">\u5b9e\u9645\u4ef7\u683c\u843d\u5728' + cp.label + '\u7f6e\u4fe1\u533a\u95f4\u5185\u7684\u6bd4\u4f8b\u3002\u63a5\u8fd1' + cp.label + '\u8bf4\u660e\u533a\u95f4\u6807\u5c3a\u53ef\u4fe1\uff1b\u660e\u663e\u504f\u4f4e=\u533a\u95f4\u592a\u7a84\uff0c\u660e\u663e\u504f\u9ad8=\u533a\u95f4\u592a\u5bbd</span></i></span><span' + cls + '>' + rate.toFixed(0) + '%</span></div>';
+      }
+
       document.getElementById(m.el).innerHTML =
-        '<div class="bt-row"><span>MAE <i class="hint">i<span class="hint-text">\u5e73\u5747\u7edd\u5bf9\u8bef\u5dee\uff0c\u5355\u4f4d\u540c\u4ef7\u683c\u3002\u8d8a\u5c0f\u8bf4\u660e\u9884\u6d4b\u8d8a\u51c6</span></i></span><span>'+mae.toFixed(2)+'</span></div>'+
-        '<div class="bt-row"><span>RMSE <i class="hint">i<span class="hint-text">\u5747\u65b9\u6839\u8bef\u5dee\uff0c\u5bf9\u5927\u504f\u5dee\u60e9\u7f5a\u66f4\u91cd\u3002\u8d8a\u5c0f\u8d8a\u597d</span></i></span><span>'+rmse.toFixed(2)+'</span></div>'+
-        '<div class="bt-row"><span>MAPE <i class="hint">i<span class="hint-text">\u5e73\u5747\u767e\u5206\u6bd4\u8bef\u5dee\uff0c\u76f4\u89c2\u663e\u793a\u201c\u5e73\u5747\u504f\u4e86\u767e\u5206\u4e4b\u51e0\u201d\u3002\u8d8a\u5c0f\u8d8a\u597d</span></i></span><span>'+mape.toFixed(1)+'%</span></div>'+
-        '<div class="bt-row"><span>\u65b9\u5411\u51c6\u786e\u7387 <i class="hint">i<span class="hint-text">\u9884\u6d4b\u6da8\u8dcc\u65b9\u5411\u4e0e\u5b9e\u9645\u4e00\u81f4\u7684\u6bd4\u4f8b\u3002>50%\u8bf4\u660e\u4f18\u4e8e\u968f\u673a\u731c\u6d4b</span></i></span><span>'+dirAcc.toFixed(1)+'%</span></div>';
+        '<div class="bt-row"><span>\u6eda\u52a8\u7a97\u53e3 <i class="hint">i<span class="hint-text">\u6bcf\u4e2a\u7a97\u53e3\u53ea\u7528\u8be5\u65f6\u70b9\u4e4b\u524d\u7684\u6570\u636e\u8bad\u7ec3\uff0c\u518d\u5411\u524d\u9884\u6d4b\uff0c\u907f\u514d\u7528\u672a\u6765\u6570\u636e\u56de\u62df\u5386\u53f2</span></i></span><span>' + usedFolds + '\u8f6e \u00d7 ' + h + '\u4ea4\u6613\u65e5</span></div>' +
+        '<div class="bt-row"><span>MAE <i class="hint">i<span class="hint-text">\u5e73\u5747\u7edd\u5bf9\u8bef\u5dee\uff0c\u5355\u4f4d\u540c\u4ef7\u683c\u3002\u8d8a\u5c0f\u8bf4\u660e\u9884\u6d4b\u8d8a\u51c6</span></i></span><span>' + mae.toFixed(2) + '</span></div>' +
+        '<div class="bt-row"><span>RMSE <i class="hint">i<span class="hint-text">\u5747\u65b9\u6839\u8bef\u5dee\uff0c\u5bf9\u5927\u504f\u5dee\u60e9\u7f5a\u66f4\u91cd\u3002\u8d8a\u5c0f\u8d8a\u597d</span></i></span><span>' + rmse.toFixed(2) + '</span></div>' +
+        '<div class="bt-row"><span>MAPE <i class="hint">i<span class="hint-text">\u5e73\u5747\u767e\u5206\u6bd4\u8bef\u5dee\uff0c\u76f4\u89c2\u663e\u793a\u201c\u5e73\u5747\u504f\u4e86\u767e\u5206\u4e4b\u51e0\u201d\u3002\u8d8a\u5c0f\u8d8a\u597d</span></i></span><span>' + mape.toFixed(1) + '%</span></div>' +
+        '<div class="bt-row"><span>\u65b9\u5411\u51c6\u786e\u7387 <i class="hint">i<span class="hint-text">\u9884\u6d4b\u6da8\u8dcc\u65b9\u5411\u4e0e\u5b9e\u9645\u4e00\u81f4\u7684\u6bd4\u4f8b\u3002>50%\u8bf4\u660e\u4f18\u4e8e\u968f\u673a\u731c\u6d4b</span></i></span><span>' + dirAcc.toFixed(1) + '%</span></div>' +
+        covPairs.map(covRow).join('') +
+        '<div class="bt-row"><span>80%\u533a\u95f4\u5e73\u5747\u5bbd\u5ea6 <i class="hint">i<span class="hint-text">80%\u533a\u95f4\u4e0a\u4e0b\u9650\u7684\u5e73\u5747\u8ddd\u79bb\uff0c\u6309\u5f53\u65f6\u4ef7\u683c\u767e\u5206\u6bd4\u8ba1\u3002\u5728\u8986\u76d6\u7387\u8fbe\u6807\u7684\u524d\u63d0\u4e0b\uff0c\u8d8a\u7a84\u8bf4\u660e\u533a\u95f4\u4fe1\u606f\u91cf\u8d8a\u9ad8</span></i></span><span>&plusmn;' + (width80/2).toFixed(1) + '%</span></div>';
     } catch(e) {
-      document.getElementById(m.el).textContent = '\u9519\u8bef: '+e.message;
+      document.getElementById(m.el).textContent = '\u9519\u8bef: ' + e.message;
     }
-  }
+  });
 }
 
 // ================================================================
@@ -804,9 +1194,9 @@ function exportCSV() {
   currentData.forEach(function(d){csv += d.date.toISOString().slice(0,10)+','+d.price.toFixed(2)+'\n';});
   if(lastPrediction && lastPrediction.forecast){
     csv += '\n--- Prediction ---\nDate,Predicted,Lower,Upper\n';
-    var ci = parseFloat(document.getElementById('confidenceSelect').value);
-    var loKey = ci<=0.80?'p25':ci<=0.90?'p5':'p5';
-    var hiKey = ci<=0.80?'p75':ci<=0.90?'p95':'p95';
+    var ciKeys = getConfidenceKeys();
+    var loKey = ciKeys.lo;
+    var hiKey = ciKeys.hi;
     lastPrediction.forecast.forEach(function(f){
       csv += f.date.toISOString().slice(0,10)+','+f.price.toFixed(2)+','+f[loKey].toFixed(2)+','+f[hiKey].toFixed(2)+'\n';
     });
@@ -834,9 +1224,9 @@ function exportReport() {
   if(lastPrediction && lastPrediction.forecast){
     report += '--- \u9884\u6d4b\u7ed3\u679c ---\n';
     report += '\u6a21\u578b: ' + lastPrediction.model + '\n';
-    var ci = parseFloat(document.getElementById('confidenceSelect').value);
-    var loKey = ci<=0.80?'p25':ci<=0.90?'p5':'p5';
-    var hiKey = ci<=0.80?'p75':ci<=0.90?'p95':'p95';
+    var ciKeys = getConfidenceKeys();
+    var loKey = ciKeys.lo;
+    var hiKey = ciKeys.hi;
     lastPrediction.forecast.forEach(function(f){
       report += f.date.toISOString().slice(0,10)+': '+f.price.toFixed(2)+' ['+f[loKey].toFixed(2)+' - '+f[hiKey].toFixed(2)+']\n';
     });
