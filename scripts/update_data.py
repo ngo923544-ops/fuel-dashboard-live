@@ -69,23 +69,30 @@ def _log(msg):
     print("[%s] %s" % (_dt.datetime.now(_dt.timezone.utc).strftime("%H:%M:%S"), msg))
 
 
-def _http(url, data=None, headers=None):
-    """GET (or POST when data is given) with retries; returns bytes."""
+def _http(url, data=None, headers=None, timeout=None, retries=None):
+    """GET (or POST when data is given) with retries; returns bytes.
+
+    Callers may shorten the retry budget via `timeout` / `retries` when a
+    fast failure is preferable to a long wait (e.g. the optional FRED
+    mirror, where we would rather fall back to EIA than burn minutes).
+    """
+    to = TIMEOUT if timeout is None else timeout
+    tries = RETRIES if retries is None else retries
     hdrs = {"User-Agent": UA, "Accept": "*/*"}
     if headers:
         hdrs.update(headers)
     ctx = ssl.create_default_context()
     last_err = None
-    for attempt in range(1, RETRIES + 1):
+    for attempt in range(1, tries + 1):
         try:
             req = urllib.request.Request(url, data=data, headers=hdrs)
-            with urllib.request.urlopen(req, timeout=TIMEOUT, context=ctx) as resp:
+            with urllib.request.urlopen(req, timeout=to, context=ctx) as resp:
                 return resp.read()
         except Exception as err:  # noqa: BLE001 - retry on any network error
             last_err = err
-            _log("  attempt %d/%d failed: %s" % (attempt, RETRIES, err))
+            _log("  attempt %d/%d failed: %s" % (attempt, tries, err))
             time.sleep(2 * attempt)
-    raise RuntimeError("HTTP request failed after %d attempts: %s" % (RETRIES, last_err))
+    raise RuntimeError("HTTP request failed after %d attempts: %s" % (tries, last_err))
 
 
 # ----------------------------------------------------------------------------
@@ -175,7 +182,7 @@ def fetch_fred_brent():
     Empty list on any unusable response (caller falls back to EIA).
     """
     start = (_dt.date.today() - _dt.timedelta(days=FRED_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
-    raw = _http(FRED_CSV % start)
+    raw = _http(FRED_CSV % start, timeout=25, retries=2)
     text = raw.decode("utf-8", "replace")
     if "<html" in text[:200].lower():
         _log("  FRED returned non-CSV payload; treating as unavailable")
