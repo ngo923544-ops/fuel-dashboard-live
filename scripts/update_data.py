@@ -11,8 +11,12 @@ data.json (keyed by date / month, so repeated runs are idempotent):
      Series: seqno=191 -> 航空煤油（新）, 新加坡市场FOB价
 
   2. US Gulf jet fuel (daily, USD/gal) and Brent crude (daily, USD/bbl)
-     Source: U.S. EIA Open Data API v2
-     Series: EER_EPJK_PF4_RGC_DPG (US Gulf kerosene jet), RBRTE (Brent spot)
+     US Gulf: U.S. EIA Open Data API v2, series EER_EPJK_PF4_RGC_DPG
+     Brent:   FRED fredgraph.csv, series DCOILBRENTEU (primary; mirrors EIA
+              RBRTE exactly but is posted ~1 week earlier, verified
+              2026-09-03 on 1667 overlapping days with max abs diff 0.0000).
+              Falls back to the EIA API v2 series RBRTE when FRED is
+              unreachable or disagrees with EIA on the last common day.
 
 Environment:
   EIA_API_KEY   Optional. Free key from https://www.eia.gov/opendata/.
@@ -47,6 +51,11 @@ EIA_SERIES = {
     "brent": "RBRTE",
 }
 EIA_LOOKBACK_DAYS = 120       # daily window to refresh
+
+# FRED mirrors EIA RBRTE exactly but posts ~1 week earlier; used as the
+# primary Brent source so the leading signal stays fresh. No API key needed.
+FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DCOILBRENTEU&cosd=%s"
+FRED_LOOKBACK_DAYS = 120
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -158,6 +167,38 @@ def fetch_eia():
 
 
 # ----------------------------------------------------------------------------
+# Source 2b: FRED (Brent, primary; mirrors EIA RBRTE, posts earlier)
+# ----------------------------------------------------------------------------
+def fetch_fred_brent():
+    """Return list of {"d": "YYYY-MM-DD", "p": float} ascending.
+
+    Empty list on any unusable response (caller falls back to EIA).
+    """
+    start = (_dt.date.today() - _dt.timedelta(days=FRED_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    raw = _http(FRED_CSV % start)
+    text = raw.decode("utf-8", "replace")
+    if "<html" in text[:200].lower():
+        _log("  FRED returned non-CSV payload; treating as unavailable")
+        return []
+    out = []
+    for line in text.splitlines()[1:]:
+        parts = line.split(",")
+        if len(parts) < 2:
+            continue
+        d, v = parts[0].strip(), parts[1].strip()
+        if not d or v in ("", ".", "NaN", "null"):
+            continue
+        try:
+            out.append({"d": d, "p": float(v)})
+        except ValueError:
+            continue
+    out.sort(key=lambda x: x["d"])
+    _log("  FRED brent: %d daily points (latest %s)" % (
+        len(out), out[-1]["d"] if out else "-"))
+    return out
+
+
+# ----------------------------------------------------------------------------
 # Merge + write
 # ----------------------------------------------------------------------------
 def load_existing():
@@ -187,7 +228,8 @@ def main():
     _log("Starting fuel data update")
     existing = load_existing()
 
-    mops_ok = eia_ok = False
+    mops_ok = usgulf_ok = brent_ok = False
+    brent_src = "none"
     mops_rows = []
     usgulf_rows = []
     brent_rows = []
@@ -200,20 +242,44 @@ def main():
     except Exception as err:  # noqa: BLE001
         _log("ERROR fetching MOPS: %s" % err)
 
+    eia_brent_rows = []
     try:
-        usgulf_rows, brent_rows = fetch_eia()
-        eia_ok = bool(usgulf_rows) and bool(brent_rows)
+        usgulf_rows, eia_brent_rows = fetch_eia()
+        usgulf_ok = bool(usgulf_rows)
+        if eia_brent_rows:
+            brent_rows = eia_brent_rows
+            brent_ok = True
+            brent_src = "eia"
     except Exception as err:  # noqa: BLE001
         _log("ERROR fetching EIA: %s" % err)
 
-    if not mops_ok and not eia_ok:
-        _log("FATAL: both sources failed; keeping existing data.json unchanged")
+    try:
+        fred_rows = fetch_fred_brent()
+        if fred_rows:
+            if eia_brent_rows:
+                eia_idx = {r["d"]: r["p"] for r in eia_brent_rows}
+                common = [r for r in fred_rows if r["d"] in eia_idx]
+                if common:
+                    c = common[-1]
+                    if abs(c["p"] - eia_idx[c["d"]]) > 0.01:
+                        _log("WARN: FRED/EIA divergence at %s (fred=%.2f eia=%.2f); preferring EIA" % (
+                            c["d"], c["p"], eia_idx[c["d"]]))
+                        fred_rows = []
+            if fred_rows:
+                brent_rows = fred_rows
+                brent_ok = True
+                brent_src = "fred"
+    except Exception as err:  # noqa: BLE001
+        _log("WARN fetching FRED brent failed; keeping EIA brent: %s" % err)
+
+    if not mops_ok and not usgulf_ok and not brent_ok:
+        _log("FATAL: all sources failed; keeping existing data.json unchanged")
         return 1
 
     merged = {
         "mops": merge_daily(existing["mops"], mops_rows) if mops_ok else existing["mops"],
-        "usgulf": merge_daily(existing["usgulf"], usgulf_rows) if eia_ok else existing["usgulf"],
-        "brent": merge_daily(existing["brent"], brent_rows) if eia_ok else existing["brent"],
+        "usgulf": merge_daily(existing["usgulf"], usgulf_rows) if usgulf_ok else existing["usgulf"],
+        "brent": merge_daily(existing["brent"], brent_rows) if brent_ok else existing["brent"],
     }
 
     def _latest(series, key):
@@ -226,12 +292,17 @@ def main():
             "mops_latest": _latest(merged["mops"], "d"),
             "usgulf_latest": _latest(merged["usgulf"], "d"),
             "brent_latest": _latest(merged["brent"], "d"),
+            "brent_source": brent_src,
             "sources": {
                 "mops": "https://price.mofcom.gov.cn/ (seqno=%s)" % MOFCOM_SEQNO,
                 "usgulf": "https://www.eia.gov/ (%s, daily)" % EIA_SERIES["usgulf"],
-                "brent": "https://www.eia.gov/ (%s, daily)" % EIA_SERIES["brent"],
+                "brent": (
+                    "https://fred.stlouisfed.org/ (DCOILBRENTEU, daily; mirrors EIA RBRTE)"
+                    if brent_src == "fred" else
+                    "https://www.eia.gov/ (%s, daily)" % EIA_SERIES["brent"]
+                ),
             },
-            "partial": (not mops_ok) or (not eia_ok),
+            "partial": (not mops_ok) or (not usgulf_ok) or (not brent_ok),
         },
         "mops": merged["mops"],
         "usgulf": merged["usgulf"],
@@ -248,7 +319,8 @@ def main():
         len(out["mops"]), len(out["usgulf"]), len(out["brent"]),
         out["meta"]["mops_latest"], out["meta"]["usgulf_latest"], out["meta"]["brent_latest"]))
     if out["meta"]["partial"]:
-        _log("NOTE: partial update (mops_ok=%s eia_ok=%s)" % (mops_ok, eia_ok))
+        _log("NOTE: partial update (mops_ok=%s usgulf_ok=%s brent_ok=%s brent_src=%s)" % (
+            mops_ok, usgulf_ok, brent_ok, brent_src))
     return 0
 
 
