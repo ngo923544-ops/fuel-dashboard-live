@@ -220,7 +220,7 @@ function mergeLiveData(ext) {
   return changed;
 }
 
-var DATA_STALE_AFTER_DAYS = 7;
+var UPDATE_STALE_AFTER_BUSINESS_DAYS = 1;
 
 function dataAgeDays(dateText) {
   if (!dateText) return null;
@@ -229,6 +229,20 @@ function dataAgeDays(dateText) {
   var now = new Date();
   var todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   return Math.max(0, Math.floor((todayUtc - dataDate.getTime()) / 86400000));
+}
+
+function businessDaysSince(timestamp) {
+  var checked = new Date(timestamp || '');
+  if (isNaN(checked.getTime())) return null;
+  var now = new Date();
+  var start = new Date(Date.UTC(checked.getUTCFullYear(), checked.getUTCMonth(), checked.getUTCDate()));
+  var end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  var days = 0;
+  for (var d = new Date(start.getTime() + 86400000); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+    var weekday = d.getUTCDay();
+    if (weekday !== 0 && weekday !== 6) days++;
+  }
+  return days;
 }
 
 function setDataBadge(mode) {
@@ -241,28 +255,26 @@ function setDataBadge(mode) {
       {name:'US Gulf', date:m.usgulf_latest},
       {name:'Brent', date:m.brent_latest}
     ];
-    var stale = [];
     var missing = [];
     var details = [];
     series.forEach(function(item){
       var age = dataAgeDays(item.date);
       if (age == null) missing.push(item.name);
-      else {
-        details.push(item.name + ' ' + item.date + '（距今' + age + '天）');
-        if (age > DATA_STALE_AFTER_DAYS) stale.push(item.name);
-      }
+      else details.push(item.name + ' ' + item.date + '（观测日期距今' + age + '天）');
     });
+    var checkAge = businessDaysSince(m.generated_at);
+    var updateStale = checkAge == null || checkAge > UPDATE_STALE_AFTER_BUSINESS_DAYS;
     var isPartial = m.partial === true || missing.length > 0;
     var statusText;
     var statusClass;
-    if (stale.length) {
-      statusText = '数据存在延迟';
+    if (updateStale) {
+      statusText = '自动更新可能中断';
       statusClass = 'stale';
     } else if (isPartial) {
       statusText = '部分数据源更新失败';
       statusClass = 'partial';
     } else {
-      statusText = '自动更新正常';
+      statusText = '数据已更新';
       statusClass = 'live';
     }
     el.className = 'data-badge ' + statusClass;
@@ -270,11 +282,12 @@ function setDataBadge(mode) {
     series.forEach(function(item){ if(item.date) parts.push(item.name + ' ' + item.date); });
     el.textContent = parts.join(' · ');
     var titleParts = [
-      '数据文件更新时间: ' + (m.generated_at || '未知'),
-      '陈旧阈值: 超过' + DATA_STALE_AFTER_DAYS + '个自然日'
+      '最近检查时间: ' + (m.generated_at || '未知'),
+      '距最近检查: ' + (checkAge == null ? '未知' : checkAge + '个工作日'),
+      '状态按自动检查是否成功判断；观测日期滞后取决于上游发布节奏'
     ];
-    if (details.length) titleParts.push(details.join('；'));
-    if (stale.length) titleParts.push('延迟数据源: ' + stale.join('、'));
+    if (details.length) titleParts.push('上游最新观测: ' + details.join('；'));
+    if (updateStale) titleParts.push('超过' + UPDATE_STALE_AFTER_BUSINESS_DAYS + '个工作日未成功检查');
     if (isPartial) titleParts.push('本次更新不完整' + (missing.length ? '；缺少: ' + missing.join('、') : ''));
     el.title = titleParts.join('\n');
   } else if (mode === 'loading') {
