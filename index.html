@@ -158,8 +158,9 @@ body{font-family:'Inter','Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe 
 <div style="overflow-x:auto"><table class="pred-table"><thead><tr><th>日期</th><th>预测价格</th><th>置信下限</th><th>置信上限</th></tr></thead><tbody id="predTableBody"></tbody></table></div></div>
 <div class="card"><div class="card-title">回测验证</div>
 <div style="margin-bottom:8px"><button class="btn btn-warning" onclick="try{runBacktest()}catch(e){alert('回测失败: '+e.message)}">运行滚动回测 (Walk-forward)</button></div>
-<div style="margin-bottom:12px;font-size:12px;color:#64748b;line-height:1.6">按预测期数划分多轮滚动窗口，每轮只用该时点之前的数据训练、向前预测并与真实价格比对，同时统计置信区间的实际覆盖率，用于检验预测精度与区间标尺是否可信。</div>
+<div style="margin-bottom:12px;font-size:12px;color:#64748b;line-height:1.6">按预测期数划分多轮滚动窗口，每轮只用该时点之前的数据训练、向前预测并与真实价格比对，同时统计置信区间的实际覆盖率，用于检验预测精度与区间标尺是否可信。首列为「随机游走基准」（未来各步=最后已知价），是模型必须跑赢的下限——若某模型的误差还不如它，等于没建模。</div>
 <div class="backtest-grid">
+<div class="bt-card"><h4>随机游走基准</h4><div id="btRandomWalk">点击回测按钮运行</div></div>
 <div class="bt-card"><h4>多因子加权</h4><div id="btMultifactor">点击回测按钮运行</div></div>
 <div class="bt-card"><h4>SMA移动平均</h4><div id="btSMA">点击回测按钮运行</div></div>
 <div class="bt-card"><h4>Holt线性趋势</h4><div id="btHolt">点击回测按钮运行</div></div>
@@ -941,6 +942,39 @@ function predictHolt(data, horizon) {
   return forecast;
 }
 
+// 随机游走基准（naive）：所有未来步长都平推「最后已知价格」。
+// 这是衡量其它模型是否真有价值的下限——跑不赢它就等于没建模。
+// 区间沿用与 SMA 相同的“按步长统计历史相对误差 + 波动率缩放”口径，保证覆盖率可比。
+function predictRandomWalk(data, horizon) {
+  var prices = data.map(function(d){return d.price;});
+  var n = prices.length;
+  var lastPrice = prices[n-1];
+  var lastDate = data[n-1].date;
+  var freq = TAB_FREQ[currentTab];
+  var invalidMask = qualityInvalidMask(data);
+  var vol = rollingVolSeries(prices, VOL_WIN, invalidMask);
+  var volNow = vol[n-1];
+  var residualsByStep = {};
+  for(var t=1;t<=horizon;t++) residualsByStep[t] = [];
+  for(var o=0;o<n-1;o++){
+    if(invalidMask[o]) continue;
+    var predAtO = prices[o];
+    if(!(predAtO > 0)) continue;
+    var scale = volScaleFactor(vol, o, volNow);
+    for(var t2=1;t2<=horizon;t2++){
+      if(o+t2 >= n) break;
+      if(invalidMask[o+t2]) continue;
+      residualsByStep[t2].push((prices[o+t2]/predAtO - 1) * scale);
+    }
+  }
+  var offsets = offsetsPerStep(residualsByStep, horizon);
+  var forecast = [];
+  for(var t3=1;t3<=horizon;t3++){
+    forecast.push(attachBands({date:advanceDate(lastDate,t3,freq), price:lastPrice}, lastPrice, offsets[t3]));
+  }
+  return forecast;
+}
+
 function getConfidenceKeys() {
   var ci = parseFloat(document.getElementById('confidenceSelect').value);
   if(ci >= 0.95) return {lo:'p2_5', hi:'p97_5'};
@@ -1161,7 +1195,7 @@ function renderPredTable(forecast) {
 // ================================================================
 //  BACKTEST (walk-forward / 滚动回测)
 // ================================================================
-var BT_MAX_FOLDS = 6;
+var BT_MAX_FOLDS = 30;   // 非重叠滚动窗口数上限；6 太少、指标被噪声主导，30 覆盖更长历史更稳
 var BT_MIN_TRAIN = 60;
 
 function runBacktest() {
@@ -1202,6 +1236,7 @@ function runBacktestCore() {
   if(folds < 1){ alert('\u6570\u636e\u4e0d\u8db3\uff0c\u65e0\u6cd5\u5212\u5206\u6eda\u52a8\u7a97\u53e3'); return; }
 
   var models = [
+    {name:'randomwalk', fn:predictRandomWalk, el:'btRandomWalk', noDirection:true},
     {name:'multifactor', fn:predictMultifactor, el:'btMultifactor'},
     {name:'sma', fn:predictSMA, el:'btSMA'},
     {name:'holt', fn:predictHolt, el:'btHolt'}
@@ -1211,6 +1246,7 @@ function runBacktestCore() {
     {label:'90%', lo:'p5', hi:'p95'},
     {label:'95%', lo:'p2_5', hi:'p97_5'}
   ];
+  var rwMetrics = null;   // 随机游走基准的 MAE/MAPE，供其它模型卡片做“相对基准”对比
 
   models.forEach(function(m){
     try {
@@ -1270,6 +1306,20 @@ function runBacktestCore() {
       var dirAcc = dirTotal>0 ? dirCorrect/dirTotal*100 : 0;
       var width80 = width80Sum/cnt*100;
 
+      if(m.name==='randomwalk') rwMetrics = {mae:mae, mape:mape};
+
+      var dirRow = m.noDirection
+        ? '<div class="bt-row"><span>方向准确率 <i class="hint">i<span class="hint-text">随机游走为平推预测（未来各步=最后已知价），没有方向可言，故记为“—”。它的意义是提供误差下限基准</span></i></span><span>—</span></div>'
+        : '<div class="bt-row"><span>方向准确率 <i class="hint">i<span class="hint-text">预测涨跌方向与实际一致的比例。>50%说明优于随机猜测</span></i></span><span>' + dirAcc.toFixed(1) + '%</span></div>';
+
+      var vsRow = '';
+      if(!m.noDirection && rwMetrics && rwMetrics.mape > 0){
+        var rel = (mape - rwMetrics.mape)/rwMetrics.mape*100;   // 负=优于基准
+        var better = rel < 0;
+        var col = better ? '#059669' : '#dc2626';
+        vsRow = '<div class="bt-row"><span>相对随机游走MAPE <i class="hint">i<span class="hint-text">与“未来价=最后已知价”的朴素基准相比，平均百分比误差的变化。绿色负值=模型确实跑赢基准，红色正值=还不如不建模</span></i></span><span style="color:'+col+'">' + (rel>=0?'+':'') + rel.toFixed(0) + '%</span></div>';
+      }
+
       function covRow(cp){
         var rate = covHit[cp.label]/cnt*100;
         var target = parseFloat(cp.label);
@@ -1286,7 +1336,8 @@ function runBacktestCore() {
         '<div class="bt-row"><span>MAE <i class="hint">i<span class="hint-text">\u5e73\u5747\u7edd\u5bf9\u8bef\u5dee\uff0c\u5355\u4f4d\u540c\u4ef7\u683c\u3002\u8d8a\u5c0f\u8bf4\u660e\u9884\u6d4b\u8d8a\u51c6</span></i></span><span>' + mae.toFixed(2) + '</span></div>' +
         '<div class="bt-row"><span>RMSE <i class="hint">i<span class="hint-text">\u5747\u65b9\u6839\u8bef\u5dee\uff0c\u5bf9\u5927\u504f\u5dee\u60e9\u7f5a\u66f4\u91cd\u3002\u8d8a\u5c0f\u8d8a\u597d</span></i></span><span>' + rmse.toFixed(2) + '</span></div>' +
         '<div class="bt-row"><span>MAPE <i class="hint">i<span class="hint-text">\u5e73\u5747\u767e\u5206\u6bd4\u8bef\u5dee\uff0c\u76f4\u89c2\u663e\u793a\u201c\u5e73\u5747\u504f\u4e86\u767e\u5206\u4e4b\u51e0\u201d\u3002\u8d8a\u5c0f\u8d8a\u597d</span></i></span><span>' + mape.toFixed(1) + '%</span></div>' +
-        '<div class="bt-row"><span>\u65b9\u5411\u51c6\u786e\u7387 <i class="hint">i<span class="hint-text">\u9884\u6d4b\u6da8\u8dcc\u65b9\u5411\u4e0e\u5b9e\u9645\u4e00\u81f4\u7684\u6bd4\u4f8b\u3002>50%\u8bf4\u660e\u4f18\u4e8e\u968f\u673a\u731c\u6d4b</span></i></span><span>' + dirAcc.toFixed(1) + '%</span></div>' +
+        vsRow +
+        dirRow +
         covPairs.map(covRow).join('') +
         '<div class="bt-row"><span>80%\u533a\u95f4\u5e73\u5747\u5bbd\u5ea6 <i class="hint">i<span class="hint-text">80%\u533a\u95f4\u4e0a\u4e0b\u9650\u7684\u5e73\u5747\u8ddd\u79bb\uff0c\u6309\u5f53\u65f6\u4ef7\u683c\u767e\u5206\u6bd4\u8ba1\u3002\u5728\u8986\u76d6\u7387\u8fbe\u6807\u7684\u524d\u63d0\u4e0b\uff0c\u8d8a\u7a84\u8bf4\u660e\u533a\u95f4\u4fe1\u606f\u91cf\u8d8a\u9ad8</span></i></span><span>&plusmn;' + (width80/2).toFixed(1) + '%</span></div>';
     } catch(e) {
