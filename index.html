@@ -697,7 +697,9 @@ function advanceDate(date, steps, freq) {
 // 多因子模型拆成「拟合参数」与「点预测」两步，
 // 便于用滚动起点在历史上复算同一模型的真实误差，从而校准置信区间。
 // catch-up 参数：MOPS 对 Brent 累计涨跌的追赶系数与随步长衰减率
-var CATCHUP_BETA = 0.7;
+// BETA=0.5 由 261 个 point-in-time 滚动窗口网格搜索得到（MAPE 最优、MAE 接近最优、
+// 单窗口胜率约 65%），且近期实时窗口亦改善；0.7 在近期行情下会过度修正，故取更稳健的 0.5。
+var CATCHUP_BETA = 0.5;
 var CATCHUP_DECAY = 0.02;
 function multifactorFit(data, opts) {
   opts = opts || {};
