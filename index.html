@@ -398,6 +398,48 @@ function qualityFilteredReturns(data, startIndex) {
   }
   return out;
 }
+
+// ================================================================
+//  CATCH-UP (跨序列对齐) 助手
+// ================================================================
+// MOPS 发布滞后于 Brent：决策时点上，上次 MOPS 更新之后 Brent 已经又走了几天。
+// 把这段“MOPS 尚未反映、但 Brent 已发生”的累计涨跌作为追赶特征喂进模型。
+// 在按日期升序的序列里找 date <= target 的最后一个价格
+function priceAtOrBefore(sortedData, targetTime) {
+  if(!sortedData || !sortedData.length) return null;
+  for(var i=sortedData.length-1;i>=0;i--){
+    if(sortedData[i].date.getTime() <= targetTime) return sortedData[i].price;
+  }
+  return null;
+}
+// 统计 (d1, d2] 区间内的工作日数量（跳过周六周日）
+function businessDaysBetween(d1, d2) {
+  if(!d1 || !d2) return 0;
+  var cnt = 0;
+  var cur = new Date(d1.getTime());
+  var guard = 0;
+  while(cur.getTime() < d2.getTime() && guard < 400){
+    cur.setDate(cur.getDate() + 1);
+    guard++;
+    var wd = cur.getDay();
+    if(wd !== 0 && wd !== 6) cnt++;
+  }
+  return cnt;
+}
+// 返回 {ret: 上次MOPS更新以来Brent累计涨跌, lag: 相隔工作日数}，数据不足时返回 null
+function computeCatchUp(mopsAnchorDate, brentData, asOfDate) {
+  if(!brentData || brentData.length < 2 || !mopsAnchorDate) return null;
+  var anchorT = mopsAnchorDate.getTime();
+  var lastBrent = brentData[brentData.length-1].date;
+  var asOf = asOfDate || lastBrent;
+  var asOfT = asOf.getTime();
+  if(asOfT <= anchorT) return null;
+  var pAnchor = priceAtOrBefore(brentData, anchorT);
+  var pAsOf = priceAtOrBefore(brentData, asOfT);
+  if(pAnchor == null || pAsOf == null || !(pAnchor > 0)) return null;
+  var lag = businessDaysBetween(mopsAnchorDate, asOf);
+  return {ret: pAsOf/pAnchor - 1, lag: Math.max(1, Math.min(20, lag))};
+}
 function downsampleWeekly(data) {
   if(data.length < 10) return data.slice();
   var weeks=[], weekStart=data[0].date.getTime(), sum=0, count=0, WEEK=7*24*3600*1000;
@@ -654,7 +696,11 @@ function advanceDate(date, steps, freq) {
 // ================================================================
 // 多因子模型拆成「拟合参数」与「点预测」两步，
 // 便于用滚动起点在历史上复算同一模型的真实误差，从而校准置信区间。
-function multifactorFit(data) {
+// catch-up 参数：MOPS 对 Brent 累计涨跌的追赶系数与随步长衰减率
+var CATCHUP_BETA = 0.7;
+var CATCHUP_DECAY = 0.02;
+function multifactorFit(data, opts) {
+  opts = opts || {};
   var prices = data.map(function(d){return d.price;});
   var n = prices.length;
   if(n<30) throw new Error('Data insufficient, need 30+ points');
@@ -722,7 +768,10 @@ function multifactorFit(data) {
     // 单日漂移限幅 ±1%，不再做1.5倍放大（该系数源自周频口径）
     drift: Math.max(-0.01, Math.min(0.01, mu)),
     w: {mom:wMom, mr:wMR, sea:wSea, vol:wVol, sum:wSum},
-    scenario: sGeo*0.02 + sSupply*0.015 + sEcon*0.01
+    scenario: sGeo*0.02 + sSupply*0.015 + sEcon*0.01,
+    // catch-up：上次 MOPS 更新以来 Brent 的累计涨跌（仅在 MOPS 页由调用方注入）
+    catchUpRet: (typeof opts.catchUpRet === 'number' && isFinite(opts.catchUpRet)) ? opts.catchUpRet : 0,
+    catchUpLag: (typeof opts.catchUpLag === 'number' && isFinite(opts.catchUpLag)) ? opts.catchUpLag : 0
   };
 }
 
@@ -740,6 +789,13 @@ function multifactorPoint(fit, t, horizon, futureMonth) {
   // 波动率分量取几何布朗运动的中位数解析解（等价于蒙特卡洛中位数，但结果可复现）
   var volComp = lastPrice * Math.exp((fit.drift - fit.sigma*fit.sigma/2) * t);
   var pred = (fit.w.mom*momComp + fit.w.mr*mrComp + fit.w.sea*(lastPrice+seaComp) + fit.w.vol*volComp) / fit.w.sum;
+  // catch-up：MOPS 锚点滞后于 Brent，用上次 MOPS 更新以来 Brent 的累计涨跌整体修正水平。
+  // 效应前重后轻（exp 衰减），并限幅，避免把 Brent 的极端波动线性外推到 MOPS。
+  if(fit.catchUpRet){
+    var catchFactor = 1 + CATCHUP_BETA * fit.catchUpRet * Math.exp(-CATCHUP_DECAY*t);
+    catchFactor = Math.max(0.75, Math.min(1.25, catchFactor));
+    pred = pred * catchFactor;
+  }
   var scenarioMod = fit.scenario * Math.min(t/horizon, 1) * Math.exp(-0.01*t);
   return Math.max(0, pred * (1 + scenarioMod));
 }
@@ -779,9 +835,10 @@ function multifactorBandOffsets(data, horizon, freq) {
   return offsetsPerStep(residualsByStep, horizon);
 }
 
-function predictMultifactor(data, horizon) {
+function predictMultifactor(data, horizon, opts) {
+  opts = opts || {};
   var freq = TAB_FREQ[currentTab];
-  var fit = multifactorFit(data);
+  var fit = multifactorFit(data, opts);
   var offsets = multifactorBandOffsets(data, horizon, freq);
   var forecast = [];
   for(var t=1;t<=horizon;t++){
@@ -906,7 +963,17 @@ function runPredictionClick() {
       var model = document.getElementById('modelSelect').value;
       var horizon = parseInt(document.getElementById('horizonInput').value) || 12;
       var forecast;
-      if(model==='multifactor') forecast = predictMultifactor(currentData, horizon);
+      if(model==='multifactor'){
+        var mfOpts = {};
+        if(currentTab==='mops'){
+          // 生产口径：以最新 MOPS 日为锚点，用更新更快的 Brent 序列计算追赶特征
+          var brentSeries = seriesDataForTab('brent');
+          var mopsAnchor = currentData[currentData.length-1].date;
+          var cu = computeCatchUp(mopsAnchor, brentSeries, brentSeries.length ? brentSeries[brentSeries.length-1].date : null);
+          if(cu){ mfOpts.catchUpRet = cu.ret; mfOpts.catchUpLag = cu.lag; }
+        }
+        forecast = predictMultifactor(currentData, horizon, mfOpts);
+      }
       else if(model==='sma') forecast = predictSMA(currentData, horizon);
       else forecast = predictHolt(currentData, horizon);
       lastPrediction = {model:model, forecast:forecast};
@@ -1113,7 +1180,23 @@ function runBacktestCore() {
   var n = currentData.length;
   var h = parseInt(document.getElementById('horizonInput').value) || 12;
   h = Math.max(3, Math.min(12, h));
-  var folds = Math.min(BT_MAX_FOLDS, Math.floor((n - BT_MIN_TRAIN) / h));
+
+  // point-in-time 对齐：仅 MOPS 页存在发布滞后。用最新 Brent 日与最新 MOPS 日的
+  // 工作日间隔估计一个代表性滞后 L（无数据时退回 4），并据此收紧可划分的窗口数，
+  // 保证「滞后后的 MOPS 训练锚点」仍满足最小训练长度。
+  var isMops = (currentTab === 'mops');
+  var mopsLag = 4;
+  if(isMops){
+    var brSeries = seriesDataForTab('brent');
+    var mLast = currentData[n-1].date;
+    var bLast = brSeries.length ? brSeries[brSeries.length-1].date : null;
+    if(bLast && bLast > mLast){
+      var bd = businessDaysBetween(mLast, bLast);
+      if(bd >= 1) mopsLag = Math.max(1, Math.min(8, bd));
+    }
+  }
+  var lagAdj = isMops ? mopsLag : 0;
+  var folds = Math.min(BT_MAX_FOLDS, Math.floor((n - BT_MIN_TRAIN - lagAdj) / h));
   if(folds < 1){ alert('\u6570\u636e\u4e0d\u8db3\uff0c\u65e0\u6cd5\u5212\u5206\u6eda\u52a8\u7a97\u53e3'); return; }
 
   var models = [
@@ -1137,11 +1220,26 @@ function runBacktestCore() {
 
       for(var f=folds; f>=1; f--){
         var trainEnd = n - f*h;
-        if(trainEnd < BT_MIN_TRAIN) continue;
-        var train = currentData.slice(0, trainEnd);
-        var test = currentData.slice(trainEnd, trainEnd + h);
+        var anchorEnd, testStart, fOpts;
+        if(isMops){
+          // 决策时点 = trainEnd-1。此刻 Brent 已更新到该日，但 MOPS 只发布到 trainEnd-1-L。
+          anchorEnd = trainEnd - mopsLag;
+          testStart = anchorEnd;
+          if(anchorEnd < BT_MIN_TRAIN) continue;
+          var asOfDate = currentData[trainEnd-1].date;
+          var mAnchorDate = currentData[anchorEnd-1].date;
+          var cu = computeCatchUp(mAnchorDate, seriesDataForTab('brent'), asOfDate);
+          fOpts = cu ? {catchUpRet: cu.ret, catchUpLag: cu.lag} : {};
+        } else {
+          anchorEnd = trainEnd;
+          testStart = trainEnd;
+          fOpts = {};
+        }
+        if(anchorEnd < BT_MIN_TRAIN) continue;
+        var train = currentData.slice(0, anchorEnd);
+        var test = currentData.slice(testStart, testStart + h);
         if(test.length < 2) continue;
-        var forecast = m.fn(train, test.length);
+        var forecast = (m.name==='multifactor') ? m.fn(train, test.length, fOpts) : m.fn(train, test.length);
         usedFolds++;
         for(var i=0;i<test.length;i++){
           var actual = test[i].price;
@@ -1177,8 +1275,12 @@ function runBacktestCore() {
         return '<div class="bt-row"><span>' + cp.label + '\u533a\u95f4\u8986\u76d6\u7387 <i class="hint">i<span class="hint-text">\u5b9e\u9645\u4ef7\u683c\u843d\u5728' + cp.label + '\u7f6e\u4fe1\u533a\u95f4\u5185\u7684\u6bd4\u4f8b\u3002\u63a5\u8fd1' + cp.label + '\u8bf4\u660e\u533a\u95f4\u6807\u5c3a\u53ef\u4fe1\uff1b\u660e\u663e\u504f\u4f4e=\u533a\u95f4\u592a\u7a84\uff0c\u660e\u663e\u504f\u9ad8=\u533a\u95f4\u592a\u5bbd</span></i></span><span' + cls + '>' + rate.toFixed(0) + '%</span></div>';
       }
 
+      var lagNote = isMops ? (' · 含' + mopsLag + '日MOPS发布滞后(point-in-time)') : '';
+      var windowHint = isMops
+        ? 'point-in-time 对齐：每个窗口模拟 MOPS 发布滞后——决策时点只用当时已发布的 MOPS（滞后 ' + mopsLag + ' 个工作日）训练，并把此后 Brent 的累计涨跌作为追赶特征注入多因子模型，避免用未来数据回拟历史'
+        : '每个窗口只用该时点之前的数据训练，再向前预测，避免用未来数据回拟历史';
       document.getElementById(m.el).innerHTML =
-        '<div class="bt-row"><span>\u6eda\u52a8\u7a97\u53e3 <i class="hint">i<span class="hint-text">\u6bcf\u4e2a\u7a97\u53e3\u53ea\u7528\u8be5\u65f6\u70b9\u4e4b\u524d\u7684\u6570\u636e\u8bad\u7ec3\uff0c\u518d\u5411\u524d\u9884\u6d4b\uff0c\u907f\u514d\u7528\u672a\u6765\u6570\u636e\u56de\u62df\u5386\u53f2</span></i></span><span>' + usedFolds + '\u8f6e \u00d7 ' + h + '\u4ea4\u6613\u65e5</span></div>' +
+        '<div class="bt-row"><span>滚动窗口 <i class="hint">i<span class="hint-text">' + windowHint + '</span></i></span><span>' + usedFolds + '轮 × ' + h + '交易日' + lagNote + '</span></div>' +
         '<div class="bt-row"><span>MAE <i class="hint">i<span class="hint-text">\u5e73\u5747\u7edd\u5bf9\u8bef\u5dee\uff0c\u5355\u4f4d\u540c\u4ef7\u683c\u3002\u8d8a\u5c0f\u8bf4\u660e\u9884\u6d4b\u8d8a\u51c6</span></i></span><span>' + mae.toFixed(2) + '</span></div>' +
         '<div class="bt-row"><span>RMSE <i class="hint">i<span class="hint-text">\u5747\u65b9\u6839\u8bef\u5dee\uff0c\u5bf9\u5927\u504f\u5dee\u60e9\u7f5a\u66f4\u91cd\u3002\u8d8a\u5c0f\u8d8a\u597d</span></i></span><span>' + rmse.toFixed(2) + '</span></div>' +
         '<div class="bt-row"><span>MAPE <i class="hint">i<span class="hint-text">\u5e73\u5747\u767e\u5206\u6bd4\u8bef\u5dee\uff0c\u76f4\u89c2\u663e\u793a\u201c\u5e73\u5747\u504f\u4e86\u767e\u5206\u4e4b\u51e0\u201d\u3002\u8d8a\u5c0f\u8d8a\u597d</span></i></span><span>' + mape.toFixed(1) + '%</span></div>' +
