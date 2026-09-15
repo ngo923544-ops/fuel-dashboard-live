@@ -130,10 +130,17 @@ button,input,select{font:inherit}
 .export-copy{font-size:11px;color:var(--text-3)}
 .export-btns{display:flex;flex-wrap:wrap;gap:8px}
 .hint{position:relative;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;background:var(--accent-light);color:var(--accent);font-size:9px;font-weight:700;cursor:help;margin-left:4px;vertical-align:middle;border:1px solid var(--accent-border);flex-shrink:0;line-height:1;font-style:normal}
-.hint:hover,.hint:focus{background:var(--accent);color:#fff;outline:none}
-.hint-text{visibility:hidden;opacity:0;position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#111827;color:#f9fafb;font-size:11px;font-weight:400;padding:8px 10px;border-radius:var(--r-sm);white-space:normal;width:230px;line-height:1.5;box-shadow:0 8px 24px rgba(0,0,0,.22);z-index:100;pointer-events:none;transition:opacity .15s,visibility .15s;text-align:left;letter-spacing:0}
-.hint-text::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:#111827}
-.hint:hover .hint-text,.hint:focus .hint-text{visibility:visible;opacity:1}
+.hint:hover,.hint:focus,.hint[aria-expanded="true"]{background:var(--accent);color:#fff;outline:none}
+.hint-text{display:none}
+.hint-popover{position:fixed;z-index:10000;visibility:hidden;opacity:0;width:max-content;max-width:min(260px,calc(100vw - 24px));padding:9px 11px;border-radius:var(--r-sm);background:#111827;color:#f9fafb;font-size:11px;font-weight:400;line-height:1.55;letter-spacing:0;text-align:left;white-space:normal;box-shadow:0 10px 30px rgba(0,0,0,.26);pointer-events:auto;user-select:text;transition:opacity .15s,visibility .15s}
+.hint-popover-content{max-height:min(50vh,320px);overflow-y:auto}
+.hint-popover.visible{visibility:visible;opacity:1}
+.hint-popover::before{content:'';position:absolute;left:0;right:0;height:14px}
+.hint-popover::after{content:'';position:absolute;left:var(--hint-arrow-left,50%);transform:translateX(-50%);border:5px solid transparent}
+.hint-popover[data-placement="top"]::before{top:100%}
+.hint-popover[data-placement="bottom"]::before{bottom:100%}
+.hint-popover[data-placement="top"]::after{top:100%;border-top-color:#111827}
+.hint-popover[data-placement="bottom"]::after{bottom:100%;border-bottom-color:#111827}
 .ri-label,.stat-label,.control-group label,.factor-item>label{display:inline-flex;align-items:center}
 button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 @media(max-width:900px){
@@ -1545,10 +1552,155 @@ function exportReport() {
 }
 
 // ================================================================
+//  ACCESSIBLE TOOLTIP PORTAL
+//  Render above body so card/table overflow cannot clip hint text.
+// ================================================================
+var hintPopover = null;
+var hintPopoverContent = null;
+var activeHint = null;
+var hintHideTimer = null;
+
+function clearHintHideTimer() {
+  if(hintHideTimer) {
+    clearTimeout(hintHideTimer);
+    hintHideTimer = null;
+  }
+}
+
+function scheduleHintHide() {
+  clearHintHideTimer();
+  hintHideTimer = setTimeout(function() {
+    if(activeHint && document.activeElement === activeHint) return;
+    hideHintPopover();
+  }, 120);
+}
+
+function placeHintPopover() {
+  if(!hintPopover || !activeHint || !document.documentElement.contains(activeHint)) {
+    hideHintPopover();
+    return;
+  }
+  var viewport = window.visualViewport;
+  var viewportLeft = viewport ? viewport.offsetLeft : 0;
+  var viewportTop = viewport ? viewport.offsetTop : 0;
+  var viewportWidth = viewport ? viewport.width : window.innerWidth;
+  var viewportHeight = viewport ? viewport.height : window.innerHeight;
+  var viewportRight = viewportLeft + viewportWidth;
+  var viewportBottom = viewportTop + viewportHeight;
+  var margin = 12;
+  var arrowSize = 5;
+  var edge = margin + arrowSize;
+  var popoverVerticalPadding = 18;
+  var gap = 9;
+
+  hintPopover.style.maxWidth = Math.max(1, Math.min(260, viewportWidth - edge * 2)) + 'px';
+  hintPopoverContent.style.maxHeight = Math.max(1, Math.min(320, viewportHeight - edge * 2 - popoverVerticalPadding)) + 'px';
+  var triggerRect = activeHint.getBoundingClientRect();
+  var popoverRect = hintPopover.getBoundingClientRect();
+  var left = triggerRect.left + triggerRect.width / 2 - popoverRect.width / 2;
+  left = Math.max(viewportLeft + edge, Math.min(left, viewportRight - popoverRect.width - edge));
+
+  var top = triggerRect.top - popoverRect.height - gap;
+  var placement = 'top';
+  if(top < viewportTop + edge) {
+    top = triggerRect.bottom + gap;
+    placement = 'bottom';
+  }
+  top = Math.max(viewportTop + edge, Math.min(top, viewportBottom - popoverRect.height - edge));
+
+  var arrowLeft = triggerRect.left + triggerRect.width / 2 - left;
+  arrowLeft = Math.max(12, Math.min(arrowLeft, popoverRect.width - 12));
+  hintPopover.style.left = Math.round(left) + 'px';
+  hintPopover.style.top = Math.round(top) + 'px';
+  hintPopover.style.setProperty('--hint-arrow-left', Math.round(arrowLeft) + 'px');
+  hintPopover.setAttribute('data-placement', placement);
+}
+
+function showHintPopover(trigger) {
+  var source = trigger && trigger.querySelector('.hint-text');
+  if(!source || !source.textContent.trim()) return;
+  clearHintHideTimer();
+  if(activeHint && activeHint !== trigger) {
+    activeHint.setAttribute('aria-expanded', 'false');
+    if(activeHint.getAttribute('aria-describedby') === 'hint-popover') activeHint.removeAttribute('aria-describedby');
+  }
+  activeHint = trigger;
+  hintPopoverContent.textContent = source.textContent.trim();
+  hintPopover.classList.add('visible');
+  trigger.setAttribute('aria-expanded', 'true');
+  trigger.setAttribute('aria-describedby', 'hint-popover');
+  placeHintPopover();
+}
+
+function hideHintPopover() {
+  clearHintHideTimer();
+  if(activeHint) {
+    activeHint.setAttribute('aria-expanded', 'false');
+    if(activeHint.getAttribute('aria-describedby') === 'hint-popover') activeHint.removeAttribute('aria-describedby');
+  }
+  activeHint = null;
+  if(hintPopover) hintPopover.classList.remove('visible');
+}
+
+function initHintPopovers() {
+  hintPopover = document.createElement('div');
+  hintPopover.id = 'hint-popover';
+  hintPopover.className = 'hint-popover';
+  hintPopover.setAttribute('role', 'tooltip');
+  hintPopover.setAttribute('aria-live', 'polite');
+  hintPopoverContent = document.createElement('div');
+  hintPopoverContent.className = 'hint-popover-content';
+  hintPopover.appendChild(hintPopoverContent);
+  document.body.appendChild(hintPopover);
+
+  document.addEventListener('pointerover', function(event) {
+    var trigger = event.target.closest && event.target.closest('.hint');
+    if(trigger) showHintPopover(trigger);
+  });
+  document.addEventListener('pointerout', function(event) {
+    var trigger = event.target.closest && event.target.closest('.hint');
+    var next = event.relatedTarget;
+    if(trigger && !trigger.contains(next) && !hintPopover.contains(next) && document.activeElement !== trigger) scheduleHintHide();
+  });
+  hintPopover.addEventListener('pointerenter', clearHintHideTimer);
+  hintPopover.addEventListener('pointerleave', function() {
+    if(!activeHint || document.activeElement !== activeHint) scheduleHintHide();
+  });
+  document.addEventListener('focusin', function(event) {
+    var trigger = event.target.closest && event.target.closest('.hint');
+    if(trigger) showHintPopover(trigger);
+  });
+  document.addEventListener('focusout', function(event) {
+    var trigger = event.target.closest && event.target.closest('.hint');
+    if(trigger && activeHint === trigger && !hintPopover.matches(':hover')) hideHintPopover();
+  });
+  document.addEventListener('click', function(event) {
+    var trigger = event.target.closest && event.target.closest('.hint');
+    if(trigger) {
+      event.preventDefault();
+      trigger.focus({preventScroll:true});
+      showHintPopover(trigger);
+    } else if(!hintPopover.contains(event.target)) {
+      hideHintPopover();
+    }
+  });
+  document.addEventListener('keydown', function(event) {
+    if(event.key === 'Escape' && activeHint) hideHintPopover();
+  });
+  window.addEventListener('resize', placeHintPopover);
+  window.addEventListener('scroll', placeHintPopover, true);
+  if(window.visualViewport) {
+    window.visualViewport.addEventListener('resize', placeHintPopover);
+    window.visualViewport.addEventListener('scroll', placeHintPopover);
+  }
+}
+
+// ================================================================
 //  INITIALIZATION (CRITICAL: only show historical chart, no prediction)
 // ================================================================
 (function init(){
   try {
+    initHintPopovers();
     switchTab('mops');
     onModelChange();
     fetchLiveData(); // auto-load latest data.json; falls back to built-in data if unavailable
